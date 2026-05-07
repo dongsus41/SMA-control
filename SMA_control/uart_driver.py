@@ -4,10 +4,11 @@ PC <-> MCU UART communication
 
 Frame:  [0xAA] [CMD] [LEN] [DATA...] [CRC8]
 
-  CMD 0x01  Control        PC->MCU  30B  pwm[6]+fan[6]+enable_pid[6]+target_temp[6*uint16]
+  CMD 0x01  Control        PC->MCU  30B  mode[6]+manual_pwm[6]+manual_fan[6]+target[6*uint16]
+                           (mode = ch_ctrl_e, target = TEMP 0.25°C/LSB or FORCE 0.1g/LSB)
   CMD 0x02  State          MCU->PC  24B  pwm[6]+fan[6]+temp[6*uint16]
   CMD 0x03  Gain Update    PC->MCU  13B  kp+ki+kd+channel
-  CMD 0x04  Force Control  PC->MCU   6B  channel(1)+enable(1)+target_force(float32)
+  CMD 0x04  (폐기 — Phase 4: CMD 0x01 mode=CH_FORCE로 통합)
   CMD 0x05  Force State    MCU->PC  10B  mode(1)+channel(1)+force(float32)+displacement(float32)
   CMD 0x06  I2C Test       PC->MCU   0B
 """
@@ -22,10 +23,17 @@ STX = 0xAA
 CMD_CONTROL       = 0x01
 CMD_STATE         = 0x02
 CMD_GAIN_UPDATE   = 0x03
-CMD_FORCE_CONTROL = 0x04   # PC -> MCU: channel(1) + enable(1) + target_force(float)
+# CMD_FORCE_CONTROL = 0x04   (Phase 4 폐기 — CMD_CONTROL mode=CH_FORCE로 통합)
 CMD_FORCE_STATE   = 0x05   # MCU -> PC: mode(1) + channel(1) + force(float) + disp(float)
+CMD_I2C_TEST      = 0x06
 
 CTRL_CH = 6
+
+# Channel control modes (Phase 4 — CMD 0x01 mode[6])
+CH_OFF    = 0   # PWM=0, fan=off
+CH_MANUAL = 1   # user-set PWM 직접 적용
+CH_TEMP   = 2   # 온도 PID
+CH_FORCE  = 3   # 힘 PID (현재 단일 로드셀 제약 — 동시 활성 1채널만)
 
 # Fan status constants (from temp_control.h)
 FAN_OFF           = 0
@@ -192,44 +200,50 @@ class UartWorker(QThread):
                       f"수신: {len(data)}바이트, 필요: 최소 10바이트")
     # ── TX ────────────────────────────────────────────────────
 
-    def send_control_message(self, pwm, fan_on, pid_enable, target_temp):
-        """CMD 0x01 — 온도/PWM/FAN 제어"""
-        if not self.ser or not self.ser.is_open:
-            return
+    def send_control_message(self, mode, manual_pwm=0, manual_fan=False,
+                             target=0.0, display_ch=0):
+        """CMD 0x01 — Phase 4 새 페이로드 (30B).
 
-        payload = bytearray()
-        pwm_val = max(0, min(100, int(pwm)))
-        fan_val = 1 if fan_on    else 0
-        pid_val = 1 if pid_enable else 0
+        단일 표시 채널 운용 가정: display_ch만 mode/manual_pwm/manual_fan/target
+        적용, 나머지 채널은 CH_OFF.
 
-        for _ in range(CTRL_CH): payload.append(pwm_val)
-        for _ in range(CTRL_CH): payload.append(fan_val)
-        for _ in range(CTRL_CH): payload.append(pid_val)
-
-        raw_target = int(target_temp * 4) & 0xFFFF
-        for _ in range(CTRL_CH):
-            payload.append(raw_target & 0xFF)
-            payload.append((raw_target >> 8) & 0xFF)
-
-        try:
-            self.ser.write(build_frame(CMD_CONTROL, bytes(payload)))
-        except serial.SerialException:
-            pass
-
-    def send_force_control_message(self, channel: int, enable: bool,
-                                   target_force: float):
-        """CMD 0x04 — 힘 제어 모드 설정
-        payload: channel(uint8) + enable(uint8) + target_force(float32_LE) = 6 bytes
+        Args:
+            mode (int): CH_OFF / CH_MANUAL / CH_TEMP / CH_FORCE
+            manual_pwm (int): 0~100 (CH_MANUAL일 때만 의미)
+            manual_fan (bool): True/False (CH_MANUAL일 때만 의미)
+            target (float): TEMP=°C, FORCE=g (mode 따라 LSB 변환)
+            display_ch (int): 명령을 적용할 채널 (0~5)
         """
         if not self.ser or not self.ser.is_open:
             return
 
-        payload = struct.pack('<BBf',
-                              int(channel),
-                              1 if enable else 0,
-                              float(target_force))
+        # mode[6] / manual_pwm[6] / manual_fan[6]
+        mode_arr       = [CH_OFF] * CTRL_CH
+        manual_pwm_arr = [0]      * CTRL_CH
+        manual_fan_arr = [0]      * CTRL_CH
+
+        ch = max(0, min(CTRL_CH - 1, int(display_ch)))
+        mode_arr[ch]       = int(mode)
+        manual_pwm_arr[ch] = max(0, min(100, int(manual_pwm)))
+        manual_fan_arr[ch] = 1 if manual_fan else 0
+
+        # target[6 × u16] — display_ch만 raw 값, 나머지 0
+        target_raw = [0] * CTRL_CH
+        if mode == CH_TEMP:
+            target_raw[ch] = max(0, min(0xFFFF, int(round(target * 4))))   # 0.25°C/LSB
+        elif mode == CH_FORCE:
+            target_raw[ch] = max(0, min(0xFFFF, int(round(target * 10))))  # 0.1g/LSB
+
+        payload = bytearray()
+        payload.extend(mode_arr)
+        payload.extend(manual_pwm_arr)
+        payload.extend(manual_fan_arr)
+        for v in target_raw:
+            payload.append(v & 0xFF)
+            payload.append((v >> 8) & 0xFF)
+
         try:
-            self.ser.write(build_frame(CMD_FORCE_CONTROL, payload))
+            self.ser.write(build_frame(CMD_CONTROL, bytes(payload)))
         except serial.SerialException:
             pass
 

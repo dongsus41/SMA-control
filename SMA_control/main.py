@@ -7,7 +7,7 @@ from PyQt5 import uic
 from PyQt5.QtCore import Qt, QTimer
 import pyqtgraph as pg
 
-from uart_driver import UartWorker
+from uart_driver import UartWorker, CH_OFF, CH_MANUAL, CH_TEMP, CH_FORCE
 
 # ============================================================
 #  설정
@@ -180,44 +180,55 @@ class MainWindow(QMainWindow):
               f"(UART: {SERIAL_PORT} @ {SERIAL_BAUD}baud)")
 
     def apply_settings(self):
+        """ctrl_mode → 채널 모드 매핑 (Phase 4: 단일 send_control_message로 통합)."""
         if self.ctrl_mode == MODE_MANUAL:
             self.current_pwm      = self.spin_pwm.value()
             self.current_fan      = self.chk_fan.isChecked()
             self.current_pid_mode = False
-            # 혹시 이전에 Force 모드였다면 해제
-            self.worker.send_force_control_message(
-                channel=DISPLAY_CH, enable=False, target_force=0.0)
             print(f"Applied: Manual  PWM={self.current_pwm}  FAN={self.current_fan}")
 
         elif self.ctrl_mode == MODE_TEMP:
             self.current_target   = self.spin_target.value()
             self.current_pid_mode = True
-            # 혹시 이전에 Force 모드였다면 해제
-            self.worker.send_force_control_message(
-                channel=DISPLAY_CH, enable=False, target_force=0.0)
             print(f"Applied: Temp PID  Target={self.current_target}°C")
 
         else:  # MODE_FORCE
             self.current_force_target = self.spin_target_force.value()
             self.current_pid_mode     = False
             self.current_pwm          = 0
-            # MCU에 힘 제어 모드 활성화 명령 전송
-            self.worker.send_force_control_message(
-                channel=DISPLAY_CH,
-                enable=True,
-                target_force=self.current_force_target)
             print(f"Applied: Force Ctrl  Target={self.current_force_target}g  "
                   f"CH={DISPLAY_CH}")
 
-    def send_heartbeat(self):
-        """Force 모드일 때는 온도 제어 heartbeat 전송 안 함"""
-        if self.ctrl_mode != MODE_FORCE:
+        # 즉시 한 번 전송 (heartbeat 대기 안 함)
+        self._send_current_command()
+
+    def _send_current_command(self):
+        """현재 ctrl_mode + 입력값으로 CMD 0x01 1회 송신 (Phase 4 새 페이로드)."""
+        if self.ctrl_mode == MODE_MANUAL:
             self.worker.send_control_message(
-                pwm=self.current_pwm,
-                fan_on=self.current_fan,
-                pid_enable=self.current_pid_mode,
-                target_temp=self.current_target
-            )
+                mode=CH_MANUAL,
+                manual_pwm=self.current_pwm,
+                manual_fan=self.current_fan,
+                target=0.0,
+                display_ch=DISPLAY_CH)
+        elif self.ctrl_mode == MODE_TEMP:
+            self.worker.send_control_message(
+                mode=CH_TEMP,
+                manual_pwm=0,
+                manual_fan=False,
+                target=self.current_target,
+                display_ch=DISPLAY_CH)
+        else:  # MODE_FORCE
+            self.worker.send_control_message(
+                mode=CH_FORCE,
+                manual_pwm=0,
+                manual_fan=False,
+                target=self.current_force_target,
+                display_ch=DISPLAY_CH)
+
+    def send_heartbeat(self):
+        """100ms 주기로 현재 명령 재송신 (모든 모드 동일 — Phase 4 통합)."""
+        self._send_current_command()
 
     def stop_all(self):
         self.worker.running = False
@@ -232,11 +243,13 @@ class MainWindow(QMainWindow):
         self.current_pid_mode = False
         self.current_target   = 0.0
 
-        # 모든 모드 해제
-        self.worker.send_force_control_message(
-            channel=DISPLAY_CH, enable=False, target_force=0.0)
+        # 모든 채널 OFF (Phase 4)
         self.worker.send_control_message(
-            pwm=0, fan_on=False, pid_enable=False, target_temp=0.0)
+            mode=CH_OFF,
+            manual_pwm=0,
+            manual_fan=False,
+            target=0.0,
+            display_ch=DISPLAY_CH)
 
         self.tx_timer.stop()
         self.plot_timer.stop()

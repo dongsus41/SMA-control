@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "loadcell_i2c.h"
 #include "force_control.h"
+#include "channel.h"
 
 /*******************************************************************************
  * Private Variables
@@ -59,12 +60,9 @@ static inline uint8_t uart_rx_fifo_pop(uint8_t *out)
     return 1;
 }
 
-extern System_typedef system;
-extern PID_Manager_typedef pid;
-extern I2C_HandleTypeDef hi2c2;
-
-/* Forward declarations for functions defined in sma_actuator.c */
-extern void Manual_Control(uint8_t ch);
+extern System_typedef       system;     /* state_level 용 (Phase 6에서 정리) */
+extern ForceControl_TypeDef force_ctrl; /* SendForceState transitional */
+extern I2C_HandleTypeDef    hi2c2;      /* I2C Test (CMD 0x06) 용 */
 
 /*******************************************************************************
  * CRC-8 (polynomial 0x07, init 0x00)
@@ -112,86 +110,68 @@ static void UartComm_SendFrame(uint8_t cmd, const uint8_t *payload, uint8_t len)
 }
 
 /*******************************************************************************
- * Send State Report (MCU -> PC)
- *   Layout: pwm[6] + fan[6] + temp[6*uint16] = 24 bytes
+ * Send State Report (MCU -> PC) — CMD 0x02, 24 byte
+ *   Phase 4: g_state buffer 사용 (Actuator_Apply가 채움).
+ *   레이아웃: pwm[6] + fan[6] + temp[6*uint16] (state_buf_t)
  ******************************************************************************/
 void UartComm_SendState(void)
 {
     UartComm_SendFrame(CMD_STATE,
-                       system.buf_fdcan_tx.uint8,
+                       (const uint8_t*)&g_state,
                        STATE_PAYLOAD_SIZE);
 }
 
 /*******************************************************************************
- * Handle Control Command (PC -> MCU)
- *   Layout: pwm[6] + fan[6] + enable_pid[6] + target_temp[6*uint16] = 30 bytes
- *   This is the exact same logic as your FDCAN CAN3_RXID_COMMAND handler
+ * Handle Control Command (PC -> MCU) — CMD 0x01, 30 byte
+ *   Phase 4 새 페이로드:
+ *     mode[6]        : ch_ctrl_e (offset 0)
+ *     manual_pwm[6]  : 0~100 (offset 6)
+ *     manual_fan[6]  : 0/1 (offset 12)
+ *     target[6×u16]  : TEMP 0.25°C/LSB / FORCE 0.1g/LSB (offset 18, little-endian)
+ *
+ *   FORCE 동시 1채널 제약: mode[]에 CH_FORCE가 2개 이상이면 프레임 거부.
  ******************************************************************************/
 static void UartComm_HandleControl(const uint8_t *data, uint8_t len)
 {
-    if (len != CTRL_PAYLOAD_SIZE)
+    if (len != CTRL_PAYLOAD_SIZE)  /* 30 */
         return;
 
     if (system.state_level != SYSTEM_GO)
         return;
 
-    memcpy(&system.ctrl_param_now, data, RX_BYTE_CTRL_PARAM);
+    /* FORCE 동시 1채널 제약 검증 */
+    uint8_t force_count = 0;
+    for (uint8_t i = 0; i < CTRL_CH; i++) {
+        if (data[i] == CH_FORCE) force_count++;
+    }
+    if (force_count > 1) {
+        printf("WARN: CMD_CONTROL rejected — multiple CH_FORCE channels (%u)\r\n", force_count);
+        return;
+    }
 
-    for (uint8_t i = 0; i < CTRL_CH; i++)
-    {
-        if (pid.enable_pid[i] != system.ctrl_param_now.enable_pid[i])
-        {
-            pid.enable_pid[i] = system.ctrl_param_now.enable_pid[i];
-
-            if (pid.enable_pid[i])
-            {
-                pid.params[i].u_old = 0.0f;
-                pid.params[i].last_error = 0.0f;
-                pid.params[i].safety_mode = 0;
-
-                float new_target = (float)system.ctrl_param_now.target_temp[i] / 4.0f;
-                pid.params[i].setpoint = new_target;
-
-                //printf("CH %u PID enabled, Target temp: %.2f\r\n", i, pid.params[i].setpoint);
-            }
-            else
-            {
-                //printf("CH %u PID disabled\r\n", i);
-                Manual_Control(i);
-
-                if (pid.params[i].safety_mode > 0)
-                {
-                    //printf("CH %u Safety mode reset by PID disable command\r\n", i);
-                    pid.params[i].safety_mode = 0;
-                    Update_Fan_Status(i);
-                }
-            }
-        }
-        else if (pid.enable_pid[i] &&
-                 ((float)system.ctrl_param_now.target_temp[i] / 4.0f != pid.params[i].setpoint))
-        {
-            float new_target = (float)system.ctrl_param_now.target_temp[i] / 4.0f;
-            pid.params[i].setpoint = new_target;
-
-            if (pid.params[i].setpoint > pid.params[i].max_temp)
-            {
-                pid.params[i].setpoint = pid.params[i].max_temp;
-            }
-            //printf("CH %u Target temp updated: %.2f\r\n", i, pid.params[i].setpoint);
-        }
-
-        if (!pid.enable_pid[i])
-        {
-            Manual_Control(i);
+    /* mode 변경 시 PID 상태 reset */
+    for (uint8_t i = 0; i < CTRL_CH; i++) {
+        if (g_cmd.mode[i] != data[i]) {
+            g_ctrl.temp_params[i].u_old      = 0.0f;
+            g_ctrl.temp_params[i].last_error = 0.0f;
+            g_ctrl.safety_mode[i]            = 0;
         }
     }
 
+    /* 페이로드 디코드 → g_cmd */
+    for (uint8_t i = 0; i < CTRL_CH; i++) {
+        g_cmd.mode[i]       = data[0  + i];
+        g_cmd.manual_pwm[i] = data[6  + i];
+        g_cmd.manual_fan[i] = data[12 + i];
+        g_cmd.target[i]     = (uint16_t)data[18 + i*2] | ((uint16_t)data[19 + i*2] << 8);
+    }
+
     LED1_toggle;
-    system.ctrl_param_save = system.ctrl_param_now;
 }
 
 /*******************************************************************************
- * Handle Gain Update (PC -> MCU)
+ * Handle Gain Update (PC -> MCU) — CMD 0x03, 13 byte
+ *   Phase 4: g_ctrl.temp_params 향함.
  *   Layout: kp(float) + ki(float) + kd(float) + channel(uint8) = 13 bytes
  ******************************************************************************/
 static void UartComm_HandleGainUpdate(const uint8_t *data, uint8_t len)
@@ -199,55 +179,25 @@ static void UartComm_HandleGainUpdate(const uint8_t *data, uint8_t len)
     if (len != GAIN_PAYLOAD_SIZE)
         return;
 
-    memcpy(&pid.buf_fdcan_pid_tuning.uint8, data, RX_BYTE_PID_TUNING);
+    float kp, ki, kd;
+    memcpy(&kp, &data[0], 4);
+    memcpy(&ki, &data[4], 4);
+    memcpy(&kd, &data[8], 4);
+    uint8_t ch = data[12];
 
-    uint8_t ch = pid.buf_fdcan_pid_tuning.struc.channel;
-    if (ch < CTRL_CH)
-    {
-        pid.params[ch].lambda = pid.buf_fdcan_pid_tuning.struc.kp;
-        pid.params[ch].alpha  = pid.buf_fdcan_pid_tuning.struc.ki;
-        pid.params[ch].gain   = pid.buf_fdcan_pid_tuning.struc.kd;
-
-        printf("PID Gains updated for CH %u: Kp=%.2f, Ki=%.4f, Kd=%.4f\r\n",
-               ch, pid.params[ch].lambda, pid.params[ch].alpha, pid.params[ch].gain);
-
-        LED2_toggle;
-    }
-    else
-    {
+    if (ch >= CTRL_CH) {
         printf("Error: Invalid channel number %u\r\n", ch);
-    }
-}
-
-/*******************************************************************************
- * Handle Force Control Command (PC -> MCU)
- *   Layout: channel(1) + enable(1) + target_force(float) = 6 bytes
- ******************************************************************************/
-static void UartComm_HandleForceControl(const uint8_t *data, uint8_t len)
-{
-    if (len != FORCE_CTRL_PAYLOAD_SIZE)
-        return;
-
-    uint8_t channel = data[0];
-    uint8_t enable  = data[1];
-    float target_force;
-    memcpy(&target_force, &data[2], 4);
-
-    if (channel >= CTRL_CH)
-    {
-        printf("Error: Invalid force channel %u\r\n", channel);
         return;
     }
 
-    if (enable)
-    {
-        ForceControl_SetTarget(target_force);
-        ForceControl_Enable(channel);
-    }
-    else
-    {
-        ForceControl_Disable();
-    }
+    /* PID_Param_TypeDef는 lambda/alpha/gain으로 저장 */
+    g_ctrl.temp_params[ch].lambda = kp;
+    g_ctrl.temp_params[ch].alpha  = ki;
+    g_ctrl.temp_params[ch].gain   = kd;
+
+    printf("PID Gains updated for CH %u: Kp=%.2f, Ki=%.4f, Kd=%.4f\r\n",
+           ch, kp, ki, kd);
+    LED2_toggle;
 }
 
 /*******************************************************************************
@@ -272,14 +222,26 @@ static void UartComm_HandleI2CTest(const uint8_t *data, uint8_t len)
 }
 
 /*******************************************************************************
- * Send Force State Report (MCU -> PC)
- *   Layout: mode(1) + channel(1) + force(float) + displacement(float) = 10 bytes
+ * Send Force State Report (MCU -> PC) — CMD 0x05, 10 byte
+ *   Phase 4: g_cmd.mode 참조하여 active force 채널 식별.
+ *   동시 1채널 제약상 첫 CH_FORCE 채널만 송신.
+ *   Layout: mode(1) + channel(1) + force(float32_LE) + displacement(float32_LE)
  ******************************************************************************/
 void UartComm_SendForceState(void)
 {
+    int8_t force_ch = -1;
+    for (uint8_t i = 0; i < CTRL_CH; i++) {
+        if (g_cmd.mode[i] == CH_FORCE) {
+            force_ch = (int8_t)i;
+            break;
+        }
+    }
+    if (force_ch < 0) return;
+
     uint8_t payload[FORCE_STATE_PAYLOAD_SIZE];
-    payload[0] = (uint8_t)force_ctrl.mode;
-    payload[1] = force_ctrl.active_channel;
+    payload[0] = CH_FORCE;
+    payload[1] = (uint8_t)force_ch;
+    /* force_ctrl.loadcell 캐시 사용 — Controller_Update가 read한 latest 값 (transitional) */
     memcpy(&payload[2], (void*)&force_ctrl.loadcell.force, 4);
     memcpy(&payload[6], (void*)&force_ctrl.loadcell.displacement, 4);
     UartComm_SendFrame(CMD_FORCE_STATE, payload, FORCE_STATE_PAYLOAD_SIZE);
@@ -298,9 +260,7 @@ static void UartComm_HandleFrame(uint8_t cmd, const uint8_t *data, uint8_t len)
     case CMD_GAIN_UPDATE:
         UartComm_HandleGainUpdate(data, len);
         break;
-    case CMD_FORCE_CONTROL:
-        UartComm_HandleForceControl(data, len);
-        break;
+    /* CMD_FORCE_CONTROL (0x04) 폐기 — Phase 4 통합 (CMD 0x01 mode=CH_FORCE) */
     case CMD_I2C_TEST:
         UartComm_HandleI2CTest(data, len);
         break;

@@ -1,9 +1,11 @@
 """
-force_test.py — CMD 0x04 ~ 0x06 테스트 스크립트
-MCU와 UART로 통신하며 힘 제어 관련 새 명령들을 검증합니다.
+force_test.py — Phase 4 Force 모드 테스트 스크립트
+MCU와 UART로 통신하며 힘 제어 명령들을 검증합니다.
 
 사용법:
   python force_test.py COM6
+
+Phase 4 변경: CMD 0x04 폐기 → CMD 0x01 mode=CH_FORCE/CH_OFF로 통합.
 """
 
 import sys
@@ -14,12 +16,18 @@ import threading
 
 # ─── 프로토콜 상수 ───
 STX = 0xAA
+CMD_CONTROL       = 0x01
 CMD_STATE         = 0x02
-CMD_FORCE_CONTROL = 0x04
 CMD_FORCE_STATE   = 0x05
 CMD_I2C_TEST      = 0x06
 
 CTRL_CH = 6
+
+# Channel control modes (Phase 4)
+CH_OFF    = 0
+CH_MANUAL = 1
+CH_TEMP   = 2
+CH_FORCE  = 3
 
 
 def crc8(data: bytes) -> int:
@@ -141,20 +149,39 @@ def send_i2c_test(ser):
     print(">>> I2C 테스트 명령 전송")
 
 
+def _build_control_frame(force_ch, force_target_g):
+    """Phase 4 새 페이로드 (30B): mode[6]+manual_pwm[6]+manual_fan[6]+target[6×u16].
+    force_ch < 0 또는 force_target_g <= 0이면 전 채널 OFF 페이로드.
+    """
+    mode_arr       = [CH_OFF] * CTRL_CH
+    manual_pwm_arr = [0]      * CTRL_CH
+    manual_fan_arr = [0]      * CTRL_CH
+    target_raw     = [0]      * CTRL_CH
+
+    if force_ch is not None and force_ch >= 0:
+        mode_arr[force_ch]   = CH_FORCE
+        target_raw[force_ch] = max(0, min(0xFFFF, int(round(force_target_g * 10))))  # 0.1g/LSB
+
+    payload = bytearray()
+    payload.extend(mode_arr)
+    payload.extend(manual_pwm_arr)
+    payload.extend(manual_fan_arr)
+    for v in target_raw:
+        payload.append(v & 0xFF)
+        payload.append((v >> 8) & 0xFF)
+    return build_frame(CMD_CONTROL, bytes(payload))
+
+
 def send_force_enable(ser, channel, target_force):
-    """CMD 0x04: 힘 제어 활성화"""
-    payload = struct.pack('<BBf', channel, 1, target_force)
-    frame = build_frame(CMD_FORCE_CONTROL, bytes(payload))
-    ser.write(frame)
-    print(f">>> 힘 제어 ON: ch={channel}, target={target_force}g")
+    """CMD 0x01 mode=CH_FORCE — 힘 제어 활성화"""
+    ser.write(_build_control_frame(channel, target_force))
+    print(f">>> 힘 제어 ON: ch={channel}, target={target_force}g (CMD 0x01)")
 
 
 def send_force_disable(ser, channel):
-    """CMD 0x04: 힘 제어 비활성화"""
-    payload = struct.pack('<BBf', channel, 0, 0.0)
-    frame = build_frame(CMD_FORCE_CONTROL, bytes(payload))
-    ser.write(frame)
-    print(f">>> 힘 제어 OFF: ch={channel}")
+    """CMD 0x01 모든 채널 CH_OFF — 힘 제어 비활성화"""
+    ser.write(_build_control_frame(None, 0.0))
+    print(f">>> 힘 제어 OFF: 모든 채널 CH_OFF (CMD 0x01)")
 
 
 # ─── 메인 ───
@@ -181,8 +208,8 @@ def main():
 
     print("명령어:")
     print("  1  →  I2C 통신 테스트 (CMD 0x06)")
-    print("  2  →  힘 제어 ON (CMD 0x04)")
-    print("  3  →  힘 제어 OFF (CMD 0x04)")
+    print("  2  →  힘 제어 ON  (CMD 0x01 mode=CH_FORCE)")
+    print("  3  →  힘 제어 OFF (CMD 0x01 mode=CH_OFF)")
     print("  q  →  종료")
     print()
 

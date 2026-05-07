@@ -24,15 +24,22 @@ BAUDRATE = 115200
 STX               = 0xAA
 CMD_CONTROL       = 0x01
 CMD_STATE         = 0x02
-CMD_FORCE_CONTROL = 0x04
+# CMD_FORCE_CONTROL = 0x04  (Phase 4 폐기 — CMD_CONTROL mode=CH_FORCE로 통합)
 CMD_FORCE_STATE   = 0x05
 
 CTRL_CH      = 6
 DISPLAY_CH   = 0
 
+# UI 모드 (사용자 노출)
 MODE_MANUAL = 0
 MODE_TEMP   = 1
 MODE_FORCE  = 2
+
+# 채널 제어 모드 (CMD 0x01 mode[6] — 펌웨어 ch_ctrl_e와 일치)
+CH_OFF    = 0
+CH_MANUAL = 1
+CH_TEMP   = 2
+CH_FORCE  = 3
 
 
 def crc8(data: bytes) -> int:
@@ -143,26 +150,39 @@ class Controller:
         elif cmd == CMD_FORCE_STATE and len(data) >= 10:
             self.force, self.disp = struct.unpack_from('<ff', data, 2)
 
-    def send_control(self):
-        payload = bytearray()
-        pwm_val = max(0, min(100, self.pwm))
-        fan_val = 1 if self.fan    else 0
-        pid_val = 1 if self.pid_enable else 0
-        raw_t   = int(self.target_temp * 4) & 0xFFFF
+    def _ui_mode_to_ch_mode(self):
+        if self.mode == MODE_MANUAL: return CH_MANUAL
+        if self.mode == MODE_TEMP:   return CH_TEMP
+        if self.mode == MODE_FORCE:  return CH_FORCE
+        return CH_OFF
 
-        for _ in range(CTRL_CH): payload.append(pwm_val)
-        for _ in range(CTRL_CH): payload.append(fan_val)
-        for _ in range(CTRL_CH): payload.append(pid_val)
-        for _ in range(CTRL_CH):
-            payload.append(raw_t & 0xFF)
-            payload.append((raw_t >> 8) & 0xFF)
+    def send_control(self):
+        """Phase 4 새 페이로드: mode[6] + manual_pwm[6] + manual_fan[6] + target[6×u16]."""
+        ch_mode = self._ui_mode_to_ch_mode()
+
+        mode_arr       = [CH_OFF] * CTRL_CH
+        manual_pwm_arr = [0]      * CTRL_CH
+        manual_fan_arr = [0]      * CTRL_CH
+        target_raw     = [0]      * CTRL_CH
+
+        ch = DISPLAY_CH
+        mode_arr[ch]       = ch_mode
+        manual_pwm_arr[ch] = max(0, min(100, self.pwm))
+        manual_fan_arr[ch] = 1 if self.fan else 0
+        if ch_mode == CH_TEMP:
+            target_raw[ch] = max(0, min(0xFFFF, int(round(self.target_temp * 4))))    # 0.25°C/LSB
+        elif ch_mode == CH_FORCE:
+            target_raw[ch] = max(0, min(0xFFFF, int(round(self.target_force * 10))))  # 0.1g/LSB
+
+        payload = bytearray()
+        payload.extend(mode_arr)
+        payload.extend(manual_pwm_arr)
+        payload.extend(manual_fan_arr)
+        for v in target_raw:
+            payload.append(v & 0xFF)
+            payload.append((v >> 8) & 0xFF)
 
         self.ser.write(build_frame(CMD_CONTROL, bytes(payload)))
-
-    def send_force_control(self, enable):
-        payload = struct.pack('<BBf', DISPLAY_CH, 1 if enable else 0,
-                              self.target_force)
-        self.ser.write(build_frame(CMD_FORCE_CONTROL, payload))
 
     def print_status(self):
         mode_str = ['MANUAL', 'TEMP PID', 'FORCE'][self.mode]
@@ -189,11 +209,10 @@ class Controller:
         st = threading.Thread(target=status_loop, daemon=True)
         st.start()
 
-        # heartbeat 스레드
+        # heartbeat 스레드 (Phase 4: 모든 모드 동일 송신 — mode 정보가 페이로드에 포함)
         def heartbeat_loop():
             while self.running:
-                if self.mode != MODE_FORCE:
-                    self.send_control()
+                self.send_control()
                 time.sleep(0.1)
 
         ht = threading.Thread(target=heartbeat_loop, daemon=True)
@@ -214,14 +233,12 @@ class Controller:
             elif cmd == 'm':
                 self.mode       = MODE_MANUAL
                 self.pid_enable = False
-                self.send_force_control(False)
                 self.send_control()
                 print(">> Manual 모드")
 
             elif cmd == 't':
                 self.mode       = MODE_TEMP
                 self.pid_enable = True
-                self.send_force_control(False)
                 self.send_control()
                 print(f">> Temp PID 모드  목표={self.target_temp}°C")
 
@@ -230,7 +247,6 @@ class Controller:
                 self.pid_enable = False
                 self.pwm        = 0
                 self.send_control()
-                self.send_force_control(True)
                 print(f">> Force 모드  목표={self.target_force}g")
 
             elif cmd.startswith('pwm '):
@@ -257,7 +273,7 @@ class Controller:
                         print(f">> 목표 온도 = {val}°C")
                     elif self.mode == MODE_FORCE:
                         self.target_force = val
-                        self.send_force_control(True)
+                        self.send_control()
                         print(f">> 목표 힘 = {val}g")
                     else:
                         print("먼저 t 또는 f 모드 선택하세요")
@@ -269,7 +285,6 @@ class Controller:
                 self.pwm        = 0
                 self.fan        = False
                 self.pid_enable = False
-                self.send_force_control(False)
                 self.send_control()
                 print(">> 긴급 정지!")
 
@@ -278,10 +293,10 @@ class Controller:
 
         # 종료
         self.running = False
+        self.mode    = MODE_MANUAL
         self.pwm     = 0
         self.fan     = False
         self.pid_enable = False
-        self.send_force_control(False)
         self.send_control()
         time.sleep(0.2)
         self.ser.close()

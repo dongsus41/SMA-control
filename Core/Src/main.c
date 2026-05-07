@@ -26,6 +26,7 @@
 #include "loadcell_i2c.h"
 #include "force_control.h"
 #include "controller.h"
+#include "channel.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -283,8 +284,7 @@ int main(void)
 	HAL_TIM_Base_Start_IT(&htim4);
 	HAL_TIM_Base_Start_IT(&htim5);
 	
-	Init_PID_Controllers(); //Dongsu.2025.04.10
-  ForceControl_Init();
+	Init_Controller();  /* Phase 4: g_ctrl.temp_params + g_cmd 초기화 (Init_PID_Controllers / ForceControl_Init 내부 호출) */
 
 //	system.state_level = SYSTEM_READY;
 	system.state_level = SYSTEM_GO;
@@ -323,10 +323,15 @@ int main(void)
 			}
 
 			Sensor_Update();
+			Safety_Update();
 			UartComm_SendState();
-			if (force_ctrl.mode == CTRL_MODE_FORCE)
-			{
-				UartComm_SendForceState();
+
+			/* Force 활성 채널 있으면 force state도 송신 */
+			for (uint8_t i = 0; i < CTRL_CH; i++) {
+				if (g_cmd.mode[i] == CH_FORCE) {
+					UartComm_SendForceState();
+					break;
+				}
 			}
 		}
 
@@ -350,6 +355,7 @@ int main(void)
 			}
 
 			Controller_Update();
+			Actuator_Apply();
 		}
 
 		/* ── UART RX 처리 ──

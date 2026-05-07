@@ -1,10 +1,11 @@
 """
-diag.py v3 — Force 모드 전환 + I2C 테스트 + 실시간 모니터링
+diag.py v4 — Force 모드 전환 (Phase 4) + I2C 테스트 + 실시간 모니터링
 실행: python diag.py
 
 1. CMD 0x06 (I2C Test)  → MCU printf로 I2C 결과 즉시 출력
-2. CMD 0x04 (Force Control enable, CH=0, target=100g)
+2. CMD 0x01 mode[CH]=CH_FORCE, target=100g
    → MCU가 Force 모드로 전환되어 CMD 0x05 프레임 전송 시작
+   (Phase 4: CMD 0x04 폐기, CMD 0x01에 통합)
 Ctrl+C로 종료
 """
 
@@ -16,10 +17,18 @@ PORT     = "COM6"
 BAUDRATE = 115200
 
 STX               = 0xAA
+CMD_CONTROL       = 0x01
 CMD_STATE         = 0x02
-CMD_FORCE_CONTROL = 0x04
 CMD_FORCE_STATE   = 0x05
 CMD_I2C_TEST      = 0x06
+
+CTRL_CH = 6
+
+# Channel control modes (Phase 4)
+CH_OFF    = 0
+CH_MANUAL = 1
+CH_TEMP   = 2
+CH_FORCE  = 3
 
 FORCE_CHANNEL     = 0       # 힘 제어 채널
 FORCE_TARGET      = 100.0   # 목표 힘 (g)
@@ -58,12 +67,27 @@ def main():
 
     time.sleep(0.2)
 
-    # ── 2. Force Control 활성화 전송 ──
-    # payload: channel(uint8) + enable(uint8) + target_force(float32_LE) = 6 bytes
-    payload = struct.pack('<BBf', FORCE_CHANNEL, 1, FORCE_TARGET)
-    f = build_frame(CMD_FORCE_CONTROL, payload)
+    # ── 2. Force Control 활성화 (Phase 4: CMD 0x01 mode=CH_FORCE) ──
+    # payload (30B): mode[6] + manual_pwm[6] + manual_fan[6] + target[6×u16]
+    mode_arr       = [CH_OFF] * CTRL_CH
+    manual_pwm_arr = [0]      * CTRL_CH
+    manual_fan_arr = [0]      * CTRL_CH
+    target_raw     = [0]      * CTRL_CH
+
+    mode_arr[FORCE_CHANNEL]   = CH_FORCE
+    target_raw[FORCE_CHANNEL] = max(0, min(0xFFFF, int(round(FORCE_TARGET * 10))))  # 0.1g/LSB
+
+    payload = bytearray()
+    payload.extend(mode_arr)
+    payload.extend(manual_pwm_arr)
+    payload.extend(manual_fan_arr)
+    for v in target_raw:
+        payload.append(v & 0xFF)
+        payload.append((v >> 8) & 0xFF)
+
+    f = build_frame(CMD_CONTROL, bytes(payload))
     ser.write(f)
-    print(f">> [2] CMD 0x04 Force Enable  CH={FORCE_CHANNEL}  "
+    print(f">> [2] CMD 0x01 mode[{FORCE_CHANNEL}]=CH_FORCE  "
           f"Target={FORCE_TARGET}g  전송: {f.hex()}")
     print("\n실시간 수신 (Ctrl+C로 종료):\n")
 
@@ -151,9 +175,10 @@ def main():
         print(f"  힘   프레임  (0x05): {counts[CMD_FORCE_STATE]}개")
         if counts[CMD_FORCE_STATE] == 0:
             print("\n  ⚠️  힘 프레임 없음 — 확인사항:")
-            print("  1. MCU printf에 'Force control enabled' 메시지 있었는지 확인")
-            print("  2. 없으면 CMD 0x04가 MCU에 안 들어간 것 → UART RX 방향 확인")
-            print("  3. 있으면 I2C 문제 → 아두이노 배선/주소(0x08) 확인")
+            print("  1. MCU printf에 'WARN' 메시지 (force_count > 1) 있는지 확인")
+            print("  2. CMD 0x01이 MCU에 도달했는지 → UART RX 방향 / 페이로드 30B 확인")
+            print("  3. mode[CH_FORCE 채널] 값이 3인지 확인")
+            print("  4. I2C 문제 → 아두이노 배선/주소(0x08) 확인")
 
     ser.close()
 

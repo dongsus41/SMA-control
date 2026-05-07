@@ -26,14 +26,13 @@
 #define CMD_CONTROL           0x01
 #define CMD_STATE             0x02
 #define CMD_GAIN_UPDATE       0x03
-#define CMD_FORCE_CONTROL     0X04
+/* CMD_FORCE_CONTROL (0x04) Phase 4 폐기 — CMD 0x01 mode=CH_FORCE로 통합 */
 #define CMD_FORCE_STATE       0X05
 #define CMD_I2C_TEST          0X06
 
 #define CTRL_PAYLOAD_SIZE     RX_BYTE_CTRL_PARAM   /* 30 */
 #define STATE_PAYLOAD_SIZE    TX_BYTE_FDCAN         /* 24 */
 #define GAIN_PAYLOAD_SIZE     RX_BYTE_PID_TUNING    /* 13 */
-#define FORCE_CTRL_PAYLOAD_SIZE    6
 #define FORCE_STATE_PAYLOAD_SIZE   10
 
 typedef enum {
