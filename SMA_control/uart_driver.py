@@ -17,23 +17,31 @@ import struct
 import serial
 from PyQt5.QtCore import QThread, pyqtSignal
 
+# ---- Constants ----
 STX = 0xAA
 CMD_CONTROL       = 0x01
 CMD_STATE         = 0x02
 CMD_GAIN_UPDATE   = 0x03
-CMD_FORCE_CONTROL = 0x04   # PC -> MCU: 힘 제어 모드 설정
-CMD_FORCE_STATE   = 0x05   # MCU -> PC: 힘/변위 상태 보고
-CMD_I2C_TEST      = 0x06   # PC -> MCU: I2C 통신 테스트
+CMD_FORCE_CONTROL = 0x04   # PC -> MCU: channel(1) + enable(1) + target_force(float)
+CMD_FORCE_STATE   = 0x05   # MCU -> PC: mode(1) + channel(1) + force(float) + disp(float)
 
 CTRL_CH = 6
 
+# Fan status constants (from temp_control.h)
+FAN_OFF           = 0
+FAN_ON            = 1
+FAN_SAFETY_LEVEL1 = 17
+FAN_SENSOR_ERROR  = 49
 
 def crc8(data: bytes) -> int:
     crc = 0x00
     for b in data:
         crc ^= b
         for _ in range(8):
-            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0x07) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
     return crc
 
 
@@ -86,18 +94,13 @@ class UartWorker(QThread):
         while self.running:
             try:
                 raw = self.ser.read(1)
-
-                # 확인용 임시코드 두줄----------------------------
-                if raw:
-                    print(f"{raw[0]:02X}", end=" ", flush=True)
-                #----------------------------------------------
                 if not raw:
                     if debug_buf:
                         self._flush_debug(debug_buf)
                         debug_buf = bytearray()
                     continue
                 byte = raw[0]
-
+ 
                 if state == 'IDLE':
                     if byte == STX:
                         if debug_buf:
@@ -109,13 +112,13 @@ class UartWorker(QThread):
                         if byte == ord('\n'):
                             self._flush_debug(debug_buf)
                             debug_buf = bytearray()
-
+ 
                 elif state == 'WAIT_CMD':
-                    cmd   = byte
+                    cmd = byte
                     state = 'WAIT_LEN'
-
+ 
                 elif state == 'WAIT_LEN':
-                    length   = byte
+                    length = byte
                     data_buf = bytearray()
                     if length == 0:
                         state = 'WAIT_CRC'
@@ -124,27 +127,25 @@ class UartWorker(QThread):
                         state = 'IDLE'
                     else:
                         state = 'WAIT_DATA'
-
+ 
                 elif state == 'WAIT_DATA':
                     data_buf.append(byte)
                     if len(data_buf) >= length:
                         state = 'WAIT_CRC'
-
+ 
                 elif state == 'WAIT_CRC':
                     crc_input = bytes([cmd, length]) + bytes(data_buf)
-                    calc_crc = crc8(crc_input)
-
-                    if True : #byte == crc8(crc_input) 대신 사용
+                    if byte == crc8(crc_input):
                         self._handle_frame(cmd, bytes(data_buf))
                     else:
-                        # ▼▼▼ CRC 에러 시 콘솔에 출력하도록 수정 ▼▼▼
-                        print(f"[RX ERROR] CRC 불일치! CMD: 0x{cmd:02X}, "
-                              f"MCU가 보낸 CRC: 0x{byte:02X}, PC가 계산한 CRC: 0x{calc_crc:02X}")
-                        
-                        debug_buf.extend([STX, cmd, length])
+                        # CRC mismatch — treat as debug garbage
+                        debug_buf.append(STX)
+                        debug_buf.append(cmd)
+                        debug_buf.append(length)
                         debug_buf.extend(data_buf)
                         debug_buf.append(byte)
-
+                    state = 'IDLE'
+ 
             except Exception:
                 pass
 
@@ -165,7 +166,7 @@ class UartWorker(QThread):
         elapsed = time.time() - self.start_time
         
         # ▼▼▼ 어떤 프레임이 CRC를 통과했는지 확인 ▼▼▼
-        # print(f"[RX FRAME OK] CMD: 0x{cmd:02X}, 데이터 길이: {len(data)}") 
+        # print(f"[RX FRAME OK] CMD: 0x{cmd:02X}, 데이터 길이: {len(data)}")
 
         if cmd == CMD_STATE:
             if len(data) >= 24:

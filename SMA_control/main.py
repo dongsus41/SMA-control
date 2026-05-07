@@ -268,7 +268,6 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────
 
     def handle_new_data(self, elapsed, temp_list, fan_list, pwm_list):
-        print(f"Data Recieved: {temp_list[DISPLAY_CH]}") #디버깅용
         ch   = DISPLAY_CH
         temp = temp_list[ch]
         fan  = fan_list[ch]
