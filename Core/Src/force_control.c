@@ -72,9 +72,8 @@ void ForceControl_Enable(uint8_t channel)
     force_ctrl.force_pid.integral = 0.0f;
     force_ctrl.force_pid.last_error = 0.0f;
 
-    // 해당 채널의 온도 PID 비활성화 (모드 충돌 방지)
-    pid.enable_pid[channel] = 0;
-
+    /* Phase 6: 이 함수 자체가 dead code — Task 3에서 함수 전체 제거 예정.
+     * pid.enable_pid 참조는 Phase 6 Task 2에서 제거. */
     printf("Force control enabled on CH %u\r\n", channel);
 }
 

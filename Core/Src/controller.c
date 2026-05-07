@@ -11,27 +11,35 @@ cmd_param_t   g_cmd;
 ctrl_state_t  g_ctrl;
 state_buf_t   g_state;
 
-/* 기존 글로벌 (Phase 6에서 정리 예정) */
-extern System_typedef            system;        /* state_level, pnt_pwm, state_fsw */
-extern PID_Manager_typedef       pid;           /* Init_PID_Controllers가 채움 — Init_Controller에서 g_ctrl.temp_params로 복사 */
-extern ForceControl_TypeDef      force_ctrl;    /* ForceControl_Calculate가 force_pid 직접 참조 — transitional */
+/* 기존 글로벌 (Phase 6에서 일부 정리 — system은 슬림화 후 유지) */
+extern System_typedef            system;        /* state_level, pnt_pwm */
+extern ForceControl_TypeDef      force_ctrl;    /* Phase 6 Task 3에서 제거 예정 */
 extern MAX31855_typedef          tmc;
 extern I2C_HandleTypeDef         hi2c2;
 
 /* ═══════════════ 부팅 시 1회 호출 ═══════════════
- * Phase 4 신규: g_ctrl.temp_params[i]에 PID 초기 gain (MFSMC_LAMBDA_HEAT 등) 복사.
- * 기존 Init_PID_Controllers / ForceControl_Init도 호출 — pid/force_ctrl 글로벌 채워짐
- * (transitional, Phase 6에서 정리 예정).
+ * g_ctrl.temp_params / force_params 직접 채움 (Phase 6: Init_PID_Controllers /
+ * ForceControl_Init 호출 제거됨).
  */
 void Init_Controller(void)
 {
-	Init_PID_Controllers();   /* pid.params[] 채움 */
-	ForceControl_Init();       /* force_ctrl.force_pid 채움 */
-
-	/* 새 모델로 PID 파라미터 복사 */
+	/* g_ctrl.temp_params[] PID gain 초기값 */
 	for (uint8_t i = 0; i < CTRL_CH; i++) {
-		g_ctrl.temp_params[i] = pid.params[i];
+		g_ctrl.temp_params[i].lambda            = 3.0f;    /* MFSMC_LAMBDA_HEAT */
+		g_ctrl.temp_params[i].alpha             = 12.0f;   /* MFSMC_ALPHA */
+		g_ctrl.temp_params[i].gain              = 10.0f;   /* MFSMC_GAIN */
+		g_ctrl.temp_params[i].setpoint          = 50.0f;
+		g_ctrl.temp_params[i].u_old             = 0.0f;
+		g_ctrl.temp_params[i].last_error        = 0.0f;
+		g_ctrl.temp_params[i].output_min        = 0.0f;
+		g_ctrl.temp_params[i].output_max        = 100.0f;
+		g_ctrl.temp_params[i].max_temp          = 80.0f;
+		g_ctrl.temp_params[i].critical_temp     = 120.0f;
+		g_ctrl.temp_params[i].sensor_error_temp = 200.0f;
 	}
+
+	/* force_params 초기화는 Task 3에서 추가 — 현재는 ForceControl_Init이 force_ctrl 채움 */
+	ForceControl_Init();
 
 	/* 부팅 시 모든 채널 OFF */
 	for (uint8_t i = 0; i < CTRL_CH; i++) {
@@ -140,7 +148,7 @@ void Controller_Update(void)
 				float target  = (float)g_cmd.target[i] / 4.0f;  /* 0.25°C/LSB */
 				g_ctrl.temp_params[i].setpoint = target;
 
-				float ctrl_output = Calculate_Ctrl(&g_ctrl.temp_params[i], current, i);
+				float ctrl_output = Calculate_Ctrl(current, i);
 				if (ctrl_output > 100.0f) ctrl_output = 100.0f;
 				if (ctrl_output < 0.0f)   ctrl_output = 0.0f;
 				g_ctrl.cmd_pwm[i] = (uint8_t)ctrl_output;

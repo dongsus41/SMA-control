@@ -5,21 +5,25 @@
 #include <stdbool.h>
 #include "system_defs.h"
 
-// Fan 상태값 정의
-#define FAN_OFF              0   // 팬 꺼짐 (정상 모드)
-#define FAN_ON               1   // 팬 켜짐 (정상 모드)
-#define FAN_SAFETY_LEVEL1    17  // 1단계 안전 모드 (80°C 초과)
-#define FAN_SENSOR_ERROR     49  // 센서 오류 모드 (200°C 초과 또는 -50°C 미만)
-#define SAFETY_LIMIT_TEMP	 80.0f  // 1단계 안전 모드 복구를 위한 히스테리시스(°C)
-#define SAFETY_TARGET_TEMP	 70.0f  // 1단계 안전 모드 복구를 위한 히스테리시스(°C)
-// Fan ON/OFF 제어 임계값
-#define TEMP_HIGH_THRESHOLD 8.0f
-#define TEMP_LOW_THRESHOLD 5.0f
+/* Fan 상태값 정의 (CMD 0x02 fan[i] 매립 코드) */
+#define FAN_OFF              0   /* 팬 꺼짐 (정상 모드) */
+#define FAN_ON               1   /* 팬 켜짐 (정상 모드) */
+#define FAN_SAFETY_LEVEL1    17  /* 1단계 안전 모드 (80°C 초과) */
+#define FAN_SENSOR_ERROR     49  /* 센서 오류 모드 (200°C 초과 또는 -50°C 미만) */
 
+/* Safety 임계값 */
+#define SAFETY_LIMIT_TEMP    80.0f  /* 1단계 안전 모드 진입 (°C) */
+#define SAFETY_TARGET_TEMP   70.0f  /* 1단계 안전 모드 복구 (히스테리시스) */
+
+/* Fan ON/OFF 제어 임계값 (target 대비 차이, °C) */
+#define TEMP_HIGH_THRESHOLD 8.0f    /* current >= target+8.0 → fan ON */
+#define TEMP_LOW_THRESHOLD  5.0f    /* current <= target+5.0 → fan OFF */
+
+/* PID 파라미터 + 상태 (g_ctrl.temp_params[]에 인스턴스화) */
 typedef struct {
-    float lambda;
-    float alpha;
-    float gain;
+    float lambda;            /* kp (MFSMC LAMBDA) */
+    float alpha;             /* ki (MFSMC ALPHA) */
+    float gain;              /* kd (MFSMC GAIN) */
     float setpoint;
     float u_old;
     float last_error;
@@ -30,59 +34,17 @@ typedef struct {
     float sensor_error_temp;
     uint8_t safety_mode;
     uint8_t recovery_needed;
-    float last_tracked_temp;     // 온도 상승률 추적용 이전 온도
-    uint32_t last_tracked_time;  // 온도 추적 마지막 시간 (ms)
-    uint32_t low_rise_time;      // 낮은 온도 상승률 지속 시간 (ms)
-    bool rise_rate_monitoring;   // 온도 상승률 모니터링 활성화 상태
+    float last_tracked_temp;
+    uint32_t last_tracked_time;
+    uint32_t low_rise_time;
+    bool rise_rate_monitoring;
 } PID_Param_TypeDef;
 
-typedef struct {
-    volatile uint8_t new_temp_data;     // 새로운 온도 데이터 플래그
-    volatile float temp_data[CTRL_CH];  // 온도 데이터 저장
-    volatile uint32_t temp_timestamp;   // 온도 데이터 타임스탬프
-} Shared_Data_TypeDef;
-
-#define RX_BYTE_PID_TUNING        13  //
-typedef struct {
-    float kp;                 // 비례 게인
-    float ki;                 // 적분 게인
-    float kd;                 // 미분 게인
-    uint8_t channel;          // 대상 채널 (0-5)
-    //uint8_t save_to_flash;    // 플래시에 저장할지 여부
-} Buf_FDCAN_PID_Tuning_typedef;
-
-typedef union {
-    uint8_t uint8[RX_BYTE_PID_TUNING];
-    Buf_FDCAN_PID_Tuning_typedef struc;
-} Buf_FDCAN_PID_Tuning_Union_typedef;
-
-typedef struct {
-	PID_Param_TypeDef params[CTRL_CH];  // 각 채널별 PID 제어기
-	float target_temp[CTRL_CH];            // 목표 온도
-	uint8_t enable_pid[CTRL_CH];           // PID 제어 활성화 플래그
-	Shared_Data_TypeDef shared_data;
-    uint32_t last_fan_toggle[CTRL_CH];
-    uint32_t fan_hysteresis_ms[CTRL_CH];
-
-    Buf_FDCAN_PID_Tuning_Union_typedef buf_fdcan_pid_tuning;
-    uint8_t params_updated;   // PID 파라미터 업데이트 플래그
-    uint8_t startup_phase;
-}PID_Manager_typedef;
-
-extern PID_Manager_typedef pid;
-
-float Calculate_Ctrl(PID_Param_TypeDef* pid, float current_temp, uint8_t channel);
-void Update_Fan_Status(uint8_t channel);
-
-bool Check_Temperature_Sensor(uint8_t channel, float current_temp);
-bool Check_Safety_Temperature(uint8_t channel, float current_temp);
-void Control_Fan_By_Temperature(uint8_t channel, float current_temp, float target_temp);
-
-void Set_PWM_Output(uint8_t channel, uint8_t duty_cycle);
-
-void Init_PID_Controllers(void);
-bool Check_Temperature_Rise_Rate(uint8_t channel, float current_temp);
-
-void PID_Set_Target_Temp(uint8_t channel, float target_temp);
+/** @brief MFSMC PID 계산 — g_ctrl.temp_params[channel] 직접 참조.
+ *  @param current_temp 현재 측정 온도
+ *  @param channel      0~CTRL_CH-1
+ *  @return PWM 출력 (0~MAX_PWM_LIMIT)
+ */
+float Calculate_Ctrl(float current_temp, uint8_t channel);
 
 #endif /* __PID_H */
