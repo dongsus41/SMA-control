@@ -1,5 +1,4 @@
 #include "controller.h"
-#include "channel.h"
 #include "main.h"
 #include "system_defs.h"
 #include "max31855.h"

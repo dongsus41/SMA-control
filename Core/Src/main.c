@@ -26,7 +26,6 @@
 #include "loadcell_i2c.h"
 #include "force_control.h"
 #include "controller.h"
-#include "channel.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/

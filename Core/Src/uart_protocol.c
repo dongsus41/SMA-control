@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include "loadcell_i2c.h"
 #include "force_control.h"
-#include "channel.h"
+#include "controller.h"
 
 /*******************************************************************************
  * Private Variables
