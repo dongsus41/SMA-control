@@ -54,7 +54,7 @@ typedef struct {
 } UartRxContext;
 
 void    UartComm_Init(UART_HandleTypeDef *huart);
-void    UartComm_ProcessRxByte(uint8_t byte);
+void    UartComm_Process(void);          /* main loop에서 주기 호출 — RX byte 소비 + frame 처리 */
 void    UartComm_SendState(void);
 void    UartComm_SendForceState(void);
 uint8_t UartComm_CalcCRC8(const uint8_t *data, uint16_t len);
