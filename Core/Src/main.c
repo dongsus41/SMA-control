@@ -25,6 +25,7 @@
 #include "uart_protocol.h"
 #include "loadcell_i2c.h"
 #include "force_control.h"
+#include "controller.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -167,39 +168,6 @@ void Manual_Control (uint8_t ch)
   //printf("CH %u Manual Update: PWM=%u, FAN=%s\r\n", ch, system.state_pwm[ch], (system.state_fsw[ch] == FAN_ON) ? "ON" : "OFF");
   // 제어 파라미터 동기화
   system.ctrl_param_save.fan[ch] = system.ctrl_param_now.fan[ch];
-}
-
-/* ═══════════════ TIM4 (fast tick, ~250Hz) 본체 ═══════════════
- * Phase 1: 기존 TIM4 ISR 본체 그대로 main loop로 이동.
- * 의미 변경 없음 — 호출 컨텍스트만 ISR → main loop.
- */
-static void do_fast_tick(void)
-{
-	TMC_Scan(CTRL_CH);
-
-	for (uint8_t i = 0; i < CTRL_CH; i++)
-	{
-		pid.shared_data.temp_data[i] = tmc.temp_ext14[i];
-
-		// 센서 유효성 즉시 검사
-		Check_Temperature_Sensor(i, pid.shared_data.temp_data[i]);
-
-		system.buf_fdcan_tx.struc.fan[i]  = system.state_fsw[i];
-		system.buf_fdcan_tx.struc.pwm[i]  = *system.pnt_pwm[i];
-		system.buf_fdcan_tx.struc.temp[i] = tmc.temp_ext14_raw[i];
-	}
-
-	// 타임스탬프 및 플래그 설정
-	pid.shared_data.temp_timestamp = HAL_GetTick();
-	pid.shared_data.new_temp_data  = 1;
-
-	UartComm_SendState();
-
-	//★ 힘 제어 모드일 때 힘/변위 상태도 전송
-	if (force_ctrl.mode == CTRL_MODE_FORCE)
-	{
-		UartComm_SendForceState();
-	}
 }
 
 /* ═══════════════ TIM5 (slow tick, ~10Hz) 본체 ═══════════════
@@ -420,7 +388,12 @@ int main(void)
 				}
 			}
 
-			do_fast_tick();
+			Sensor_Update();
+			UartComm_SendState();
+			if (force_ctrl.mode == CTRL_MODE_FORCE)
+			{
+				UartComm_SendForceState();
+			}
 		}
 
 		/* ── slow_tick 처리 (~10Hz) ── */
