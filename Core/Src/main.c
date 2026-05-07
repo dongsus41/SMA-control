@@ -169,37 +169,45 @@ void Manual_Control (uint8_t ch)
   system.ctrl_param_save.fan[ch] = system.ctrl_param_now.fan[ch];
 }
 
+/* ═══════════════ TIM4 (fast tick, ~250Hz) 본체 ═══════════════
+ * Phase 1: 기존 TIM4 ISR 본체 그대로 main loop로 이동.
+ * 의미 변경 없음 — 호출 컨텍스트만 ISR → main loop.
+ */
+static void do_fast_tick(void)
+{
+	TMC_Scan(CTRL_CH);
+
+	for (uint8_t i = 0; i < CTRL_CH; i++)
+	{
+		pid.shared_data.temp_data[i] = tmc.temp_ext14[i];
+
+		// 센서 유효성 즉시 검사
+		Check_Temperature_Sensor(i, pid.shared_data.temp_data[i]);
+
+		system.buf_fdcan_tx.struc.fan[i]  = system.state_fsw[i];
+		system.buf_fdcan_tx.struc.pwm[i]  = *system.pnt_pwm[i];
+		system.buf_fdcan_tx.struc.temp[i] = tmc.temp_ext14_raw[i];
+	}
+
+	// 타임스탬프 및 플래그 설정
+	pid.shared_data.temp_timestamp = HAL_GetTick();
+	pid.shared_data.new_temp_data  = 1;
+
+	UartComm_SendState();
+
+	//★ 힘 제어 모드일 때 힘/변위 상태도 전송
+	if (force_ctrl.mode == CTRL_MODE_FORCE)
+	{
+		UartComm_SendForceState();
+	}
+}
+
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if(htim->Instance == htim4.Instance)
 	{
-		TMC_Scan (CTRL_CH);
-
-		for (uint8_t i = 0; i < CTRL_CH; i++)
-		{
-			pid.shared_data.temp_data[i] = tmc.temp_ext14[i];
-
-      // 센서 유효성 즉시 검사
-      Check_Temperature_Sensor(i, pid.shared_data.temp_data[i]);
-
-			system.buf_fdcan_tx.struc.fan[i] = system.state_fsw[i];
-			system.buf_fdcan_tx.struc.pwm[i] = *system.pnt_pwm[i];
-			system.buf_fdcan_tx.struc.temp[i] = tmc.temp_ext14_raw[i];
-		}
-
-    // 타임스탬프 및 플래그 설정
-    pid.shared_data.temp_timestamp = HAL_GetTick();
-    pid.shared_data.new_temp_data = 1;  // 새 데이터 플래그 설정
-
-		UartComm_SendState();
-
-    //★ 힘 제어 모드일 때 힘/변위 상태도 전송
-    if (force_ctrl.mode == CTRL_MODE_FORCE)
-    {
-      UartComm_SendForceState();
-    }
-
+		g_sys.fast_tick++;
 	}
 
 	else if(htim->Instance == htim5.Instance)
@@ -377,6 +385,32 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+		/* ── fast_tick 처리 (~250Hz) ──
+		 * atomic swap — 3 instruction 수준의 짧은 critical section.
+		 * pending=1은 정상, 2 이상부터가 main loop 지연.
+		 * catch-up 없이 1회만 실행 (SPI/UART burst 회피).
+		 */
+		if (g_sys.fast_tick > 0U)
+		{
+			uint32_t pending;
+
+			__disable_irq();
+			pending          = g_sys.fast_tick;
+			g_sys.fast_tick  = 0U;
+			__enable_irq();
+
+			if (pending > 1U)
+			{
+				g_sys.fast_overrun_count += (pending - 1U);
+				if (pending > g_sys.fast_overrun_max)
+				{
+					g_sys.fast_overrun_max = pending;
+				}
+			}
+
+			do_fast_tick();
+		}
 	}
   /* USER CODE END 3 */
 }
