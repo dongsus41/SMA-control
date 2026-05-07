@@ -21,7 +21,7 @@
 |---|---|
 | **B-1** | TIM4/TIM5 두 박자 유지 (하드웨어 시정수상 합리적). ISR은 각자 카운터만 증가, 메인 루프가 atomic-swap으로 소비. |
 | **D-1** | 채널별 `ctrl_mode[CTRL_CH]` enum (`OFF / MANUAL / TEMP / FORCE`). 글로벌 모드 + 단일 active_channel 패턴 폐기. |
-| **L-1** | 로드셀은 fast_tick(250 Hz) 처리에서 12 ms-cap 폴링 (~83 Hz) → 8샘플 ring buffer 누적 → slow_tick(10 Hz) force PID에서 평균 사용. EXTI 하드웨어 트리거는 차후 과제. |
+| **L-1** | 로드셀은 fast_tick(250 Hz) 처리에서 12 ms-cap 폴링 (~83 Hz) → 8샘플 ring buffer 누적 → slow_tick(10 Hz) force PID에서 평균 사용. 슬레이브(Arduino+HX711)가 80 Hz 갱신 (12.5 ms)이라 캡 주기와 거의 일치. EXTI 하드웨어 트리거는 슬레이브 펌웨어가 INT 라인을 토글하지 않으므로 양쪽 펌웨어 모두 수정 필요한 차후 과제. |
 | **상태 분리** | 단일 `channel_t`로 통합하지 않고, 기존 `Ctrl_Param + PID_Param + Buf_FDCAN_Tx` 3분할 패턴을 유지하면서 mode/force 필드만 자연스럽게 흡수. |
 | **프로토콜** | CMD 0x01 페이로드 30 B 크기 동일, 의미 재정의 (호환성 깨짐 — PC 동시 업그레이드 필요). CMD 0x02 24 B 그대로. CMD 0x04 폐기. |
 
@@ -240,6 +240,21 @@ void Actuator_Apply(void) {
 
 사용자 시나리오 검증 — "force 제어가 PWM을 올리라는데 과열 상태"라면: controller는 force PID 결과로 `cmd_pwm[i] = 80` 같은 값을 넣지만, `Actuator_Apply`가 `safety_mode[i] >= 2`를 보고 `pwm = 0`으로 강제 덮어씀.
 
+### 로드셀 슬레이브 인터페이스 (참고: `loadcell_sensor.ino`)
+
+| 항목 | 값 |
+|---|---|
+| 슬레이브 | Arduino + HX711 (force) + Encoder (displacement) |
+| I2C 주소 | `0x08` (7-bit) |
+| 갱신 주기 | HX711 80 Hz 모드 (~12.5 ms) — 마스터 폴링과 비동기 |
+| 응답 (8 B) | `float displacement` (mm, offset 0~3) + `float force` (g, offset 4~7) |
+| 응답 메커니즘 | Always-ready — STM32 read 시점의 latest 값 반환 (HX711 미갱신 구간에는 동일 값 반복) |
+| INT 라인 | **토글 안 함** — L-2 (EXTI 트리거) 채택 시 Arduino 코드 수정 필요 |
+| Displacement 단위 | mm (엔코더 0.04 mm/count, 인터럽트 기반) |
+| Force 단위 | g (calibration_factor / offset 슬레이브 측 적용 완료) |
+
+12 ms-cap 폴링이 슬레이브 갱신 (12.5 ms)보다 살짝 빠르므로 평균적으로 ~1/8 확률로 동일 값이 ring buffer에 중복 push됨 — 8샘플 평균 필터에서 자연스럽게 흡수되어 별도 변화 검출 불필요.
+
 ### 기타 에러 케이스
 
 - **I2C 타임아웃 (loadcell)**: `LoadCell_Read()` 실패 시 ring buffer push 안 함 + stale flag set. Force PID는 stale 검출 시 `cmd_pwm[i] = 0`.
@@ -262,7 +277,7 @@ void Actuator_Apply(void) {
 
 ## 비결정 / 향후 과제
 
-- **EXTI 트리거 기반 로드셀 read** (L-2): 하드웨어상 PC4(`I2C2_INT_Pin`)가 EXTI Falling으로 init 돼 있지만 IRQ handler 미구현. 로드셀 측이 INT 라인을 실제로 토글하는지 검증 필요. 이번 범위 밖.
+- **EXTI 트리거 기반 로드셀 read** (L-2): 하드웨어상 PC4(`I2C2_INT_Pin`)가 EXTI Falling으로 init 돼 있고 IRQ handler 미구현 상태. 추가로 Arduino 슬레이브(`loadcell_sensor.ino`)가 INT 라인을 토글하지 않음 — 채택하려면 STM32 IRQ handler + Arduino INT 토글 로직 양쪽 모두 추가 필요. 폴링(L-1)과 슬레이브 80 Hz 갱신이 거의 동일 주기라 EXTI 도입 이득은 작음.
 - **Force PID 게인 원격 업데이트**: CMD 0x03이 temp PID용. 필요 시 CMD 0x07 등 신규 또는 0x03 페이로드에 mode 1바이트 추가.
 - **CMD 0x02에 mode/safety 별도 바이트 추가** (24→25 B): 현재는 fan 코드에 매립 유지. 차후 PC 디스플레이 명확성 필요 시 검토.
 - **레거시 FDCAN 코드 정리** (사용자 우선순위 E): 사용 안 하지만 컴파일은 됨. 차후.
