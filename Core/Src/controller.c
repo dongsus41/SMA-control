@@ -257,9 +257,5 @@ void Actuator_Apply(void)
 		/* 송신용 g_state */
 		g_state.pwm[i] = pwm;
 		g_state.fan[i] = fan_out_code;
-
-		/* transitional: 일부 잔여 코드가 system.state_fsw / state_pwm 참조할 수 있음 */
-		system.state_fsw[i] = fan ? FAN_ON : FAN_OFF;
-		system.state_pwm[i] = pwm;
 	}
 }

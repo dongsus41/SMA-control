@@ -84,11 +84,9 @@ void LL_SPI_TMC_Rx (uint8_t ch)
 	
 	tmc.temp_ext14[ch] = tmc.temp_ext14_raw[ch]*0.25f;
 	tmc.temp_int12[ch] = tmc.temp_int12_raw[ch]*0.0625f;
-	
-//	tmc.temp_correct[ch] = correctedCelsius(tmc.temp_ext14[ch], tmc.temp_int12[ch]);
 
-	system.buf_fdcan_tx.struc.temp[ch] = tmc.temp_ext14_raw[ch];
-//	system.buf_fdcan_tx.struc.temp[ch] = tmc.temp_int12_raw[ch];
+//	tmc.temp_correct[ch] = correctedCelsius(tmc.temp_ext14[ch], tmc.temp_int12[ch]);
+	/* Phase 6: system.buf_fdcan_tx 잔재 제거. g_state.temp[]는 Sensor_Update가 채움. */
 }
 
 void TMC_Scan (uint8_t end_ch)

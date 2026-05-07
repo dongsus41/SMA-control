@@ -56,11 +56,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-typedef struct {
-	FDCAN_TxHeaderTypeDef	tx_header;
-	FDCAN_RxHeaderTypeDef	rx_header;
-}Databuf_FDCAN_typedef;
-
+/* Phase 6: Databuf_FDCAN_typedef 제거 (FDCAN 미사용) */
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -79,7 +75,6 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void Manual_Control(uint8_t ch);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -137,74 +132,23 @@ void Manual_Control(uint8_t ch);
 #define I2C1_INT_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-//------------------------------------------------------------------------------------------------------------------------
 typedef enum {
-	SYSTEM_INIT		= 0,
-	SYSTEM_READY	= 1,
-	SYSTEM_GO		= 2
-}System_State_typedef;
+	SYSTEM_INIT  = 0,
+	SYSTEM_READY = 1,
+	SYSTEM_GO    = 2
+} System_State_typedef;
 
-//Flash Addresses
-#define FLASH_ADDR_PAGE_125			((uint32_t)0x0803E800)
-#define FLASH_ADDR_PAGE_126			((uint32_t)0x0803F000)
-#define FLASH_ADDR_PAGE_127			((uint32_t)0x0803F800)
-
+/* Phase 6: 거대 글로벌 슬림화 — state_level + pnt_pwm만 유지.
+ * dead 멤버 제거: buf_fdcan_tx (g_state로 대체), ctrl_param_now/save (g_cmd),
+ * state_fsw / state_pwm (g_ctrl.cmd_*), lock_motion / flag_lock_motion / uart_char /
+ * n_rx_motion(_limit) / t_count / t_target / t_sec (사용 안 함).
+ * dead typedef 제거: Buf_FDCAN_Tx_*, Ctrl_Param_typedef, param_struct / union,
+ * Flash 주소 매크로 (Flash_* 함수도 dead).
+ */
 typedef struct {
-	uint8_t pwm[N_MOTION][CTRL_CH];
-	uint8_t t[N_MOTION][N_TIMEBIN];
-}param_struct;
-
-#define FLASH_LENGTH				((N_MOTION * (N_TIMEBIN+CTRL_CH))/8)
-
-typedef union {
-	param_struct 	param_struc;
-	uint64_t 		param_uint64[FLASH_LENGTH];
-}param_union;
-
-//------------------------------------------------------------------------------------------------------------------------
-#define TX_BYTE_FDCAN				24
-#define TX_BYTE_MONITOR				(CTRL_CH*4)
-#define TX_BYTE_RESERVED			(TX_BYTE_FDCAN-TX_BYTE_MONITOR)
-
-typedef struct {
-	uint8_t pwm[CTRL_CH];
-	uint8_t fan[CTRL_CH];
-	uint16_t temp[CTRL_CH];
-//	uint8_t reserved[TX_BYTE_RESERVED];
-}Buf_FDCAN_Tx_typedef;
-
-typedef union {
-	uint8_t uint8[TX_BYTE_FDCAN];
-	Buf_FDCAN_Tx_typedef struc;
-}Buf_FDCAN_Tx_Union_typedef;
-
-//------------------------------------------------------------------------------------------------------------------------
-#define RX_BYTE_CTRL_PARAM				(CTRL_CH*5)
-
-typedef struct {
-	uint8_t pwm[CTRL_CH];
-	uint8_t fan[CTRL_CH];
-	uint8_t enable_pid[CTRL_CH];
-	uint16_t target_temp[CTRL_CH];
-}Ctrl_Param_typedef;
-
-typedef struct {
-	System_State_typedef state_level;
-	Buf_FDCAN_Tx_Union_typedef buf_fdcan_tx;
-	Ctrl_Param_typedef ctrl_param_now;
-	Ctrl_Param_typedef ctrl_param_save;
-	volatile uint32_t* pnt_pwm[CTRL_CH];
-	uint8_t lock_motion;
-	uint8_t state_fsw[CTRL_CH];
-	uint8_t state_pwm[CTRL_CH];
-	uint8_t flag_lock_motion;
-	char uart_char[100];
-	uint16_t n_rx_motion;
-	uint16_t n_rx_motion_limit;
-	uint16_t t_count;
-	uint16_t t_target;
-	uint32_t t_sec;
-}System_typedef;
+	System_State_typedef  state_level;
+	volatile uint32_t*    pnt_pwm[CTRL_CH];
+} System_typedef;
 
 extern System_typedef system;
 

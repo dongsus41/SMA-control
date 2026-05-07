@@ -60,16 +60,7 @@ DMA_HandleTypeDef hdma_usart3_tx;
 
 /* USER CODE BEGIN PV */
 System_typedef system;
-extern PID_Manager_typedef pid;
-
-Databuf_FDCAN_typedef data_fdcan;
-
-static FLASH_EraseInitTypeDef EraseInitStruct;
-param_union param;
-param_union param_flash;
-
 extern MAX31855_typedef tmc;
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -104,71 +95,10 @@ void delay_us(uint32_t n)
 		__NOP();
 }
 
-//Flash Control------------------------------------------------------------------------------------
-void Flash_Erase(uint32_t erase_page_add, uint32_t erase_page_num)
-{
-	uint32_t PAGEError = 0;
-//
-	EraseInitStruct.TypeErase   	= FLASH_TYPEERASE_PAGES;
-	EraseInitStruct.Banks			= FLASH_BANK_1;
-	EraseInitStruct.Page			= erase_page_add;
-	EraseInitStruct.NbPages			= erase_page_num;
-//
-	if (HAL_FLASHEx_Erase(&EraseInitStruct, &PAGEError) != HAL_OK)
-		Error_Handler();
-}
-
-void Flash_Write(uint32_t address, uint64_t *write_data, uint16_t length)
-{
-	uint32_t address_cnt = address;
-	uint16_t write_cnt = 0;
-
-	while (write_cnt < length)
-	{
-		if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, address_cnt, write_data[write_cnt]) == HAL_OK)
-			address_cnt = address_cnt + 8;
-		else
-			Error_Handler();
-		write_cnt++;
-	}
-}
-
-void Flash_Read(uint32_t address, uint64_t *read_data, uint16_t length)
-{
-	uint32_t address_cnt = address;
-	uint16_t read_cnt = 0;
-
-	while (read_cnt < length)
-	{
-		read_data[read_cnt++] = *(__IO uint64_t *)address_cnt;
-		address_cnt = address_cnt + 8;
-	}
-}
-
-//FDCAN-------------------------------------------------------------------------------------------
-void Manual_Control (uint8_t ch)
-{
-	// PWM 값 업데이트
-	*system.pnt_pwm[ch] = system.ctrl_param_now.pwm[ch];
-	system.state_pwm[ch] = system.ctrl_param_now.pwm[ch];
-	//printf("CH %u PWM updated %u -> %u\r\n", ch, system.ctrl_param_save.pwm[ch], system.ctrl_param_now.pwm[ch]);
-	
-	// [팬 상태 업데이트] 현재 입력받은 값을 즉시 하드웨어 반영하도록 함
-  if (system.ctrl_param_now.fan[ch] == 1)
-  {
-    FSW_on(ch);
-    system.state_fsw[ch] = FAN_ON;
-  }
-  else
-  {
-    FSW_off(ch);
-    system.state_fsw[ch] = FAN_OFF;
-  }
-	// 상태확인용 출력 메시지
-  //printf("CH %u Manual Update: PWM=%u, FAN=%s\r\n", ch, system.state_pwm[ch], (system.state_fsw[ch] == FAN_ON) ? "ON" : "OFF");
-  // 제어 파라미터 동기화
-  system.ctrl_param_save.fan[ch] = system.ctrl_param_now.fan[ch];
-}
+/* Phase 6 정리:
+ * - Flash_Erase / Flash_Write / Flash_Read 함수 제거 (사용 안 함)
+ * - Manual_Control 함수 제거 (UART 디코더가 g_cmd 채우면 끝, dead code)
+ */
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
@@ -270,7 +200,6 @@ int main(void)
 	HAL_TIM_PWM_Start(&PWM4_TIM, PWM4_TIM_CH);
 	HAL_TIM_PWM_Start(&PWM5_TIM, PWM5_TIM_CH);
 
-	system.n_rx_motion_limit = 1;
 	FDCAN_Init();
 	UartComm_Init(&huart3);
 

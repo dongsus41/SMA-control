@@ -11,8 +11,8 @@
  *
  * Frame:  [0xAA] [CMD] [LEN] [DATA...] [CRC8]
  *
- *   0x01  Control Command   PC -> MCU   30 bytes  (Ctrl_Param_typedef)
- *   0x02  State Report      MCU -> PC   24 bytes  (Buf_FDCAN_Tx_typedef)
+ *   0x01  Control Command   PC -> MCU   30 bytes  (cmd_param_t)
+ *   0x02  State Report      MCU -> PC   24 bytes  (state_buf_t)
  *   0x03  Gain Update       PC -> MCU   13 bytes  (Buf_FDCAN_PID_Tuning)
  *   0x04  Force Control     PC -> MCU    6 bytes  (channel + enable + target)
  *   0x05  Force State       MCU -> PC   10 bytes  (mode + ch + force + disp)
@@ -30,10 +30,10 @@
 #define CMD_FORCE_STATE       0X05
 #define CMD_I2C_TEST          0X06
 
-#define CTRL_PAYLOAD_SIZE     RX_BYTE_CTRL_PARAM   /* 30 */
-#define STATE_PAYLOAD_SIZE    TX_BYTE_FDCAN         /* 24 */
-#define GAIN_PAYLOAD_SIZE     RX_BYTE_PID_TUNING    /* 13 */
-#define FORCE_STATE_PAYLOAD_SIZE   10
+#define CTRL_PAYLOAD_SIZE          30   /* mode[6]+manual_pwm[6]+manual_fan[6]+target[6×u16] */
+#define STATE_PAYLOAD_SIZE         24   /* pwm[6]+fan[6]+temp[6×u16] */
+#define GAIN_PAYLOAD_SIZE          13   /* kp+ki+kd(float×3)+channel(u8) */
+#define FORCE_STATE_PAYLOAD_SIZE   10   /* mode+ch(u8×2)+force+disp(float×2) */
 
 typedef enum {
     RX_WAIT_STX,
