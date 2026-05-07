@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "common_defs.h"
+#include "system_defs.h"
 
 // Fan 상태값 정의
 #define FAN_OFF              0   // 팬 꺼짐 (정상 모드)

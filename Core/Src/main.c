@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "system_defs.h"
 #include "uart_protocol.h"
 #include "loadcell_i2c.h"
 #include "force_control.h"
@@ -33,7 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+SystemState_t g_sys;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -168,107 +169,6 @@ void Manual_Control (uint8_t ch)
   system.ctrl_param_save.fan[ch] = system.ctrl_param_now.fan[ch];
 }
 
-// void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
-// {
-// 	if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == RESET)
-//     {
-//         return;
-//     }
-
-//     /* Retrieve Rx messages from RX FIFO0 */
-// 	FDCAN_RxHeaderTypeDef rx_header;
-// 	uint8_t rx_data[64];
-//     if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK)
-//     {
-//         Error_Handler();
-//         return;
-//     }
-	
-//     //Dongsu.2025.04.10
-// 	if ((rx_header.Identifier == CAN3_RXID_COMMAND) && (rx_header.DataLength == FDCAN_DLC_BYTES_64))
-// 	{
-// 		/* 기존 제어 메시지 처리 (0x400) */
-// 	    /* 기존 처리 로직 - 변경 없음 */
-// 		if (system.state_level == SYSTEM_GO)
-//         {
-// 			memcpy(&system.ctrl_param_now, rx_data, RX_BYTE_CTRL_PARAM);
-// 			for (uint8_t i = 0; i < CTRL_CH; i++)
-// 			{
-// 			// PID 제어 활성화 상태 처리
-// 				if (pid.enable_pid[i] != system.ctrl_param_now.enable_pid[i])
-// 				{
-// 					pid.enable_pid[i] = system.ctrl_param_now.enable_pid[i];
-
-// 					if (pid.enable_pid[i])
-// 					{
-// 					    // PID 제어 활성화 시 초기화 작업
-// 						pid.params[i].u_old = 0.0f;
-// 						pid.params[i].last_error = 0.0f;
-// 						pid.params[i].safety_mode = 0;
-
-// 						// 목표 온도 설정 (0.25도 단위로 변환)
-// 						float new_target = (float)system.ctrl_param_now.target_temp[i] / 4.0f;
-// 						pid.params[i].setpoint = new_target;
-
-// 						printf("CH %u PID enabled, Target temp: %.2f°C\r\n", i, pid.params[i].setpoint);
-// 					}
-// 				    else if (!pid.enable_pid[i])
-// 				    {
-// 				        printf("CH %u PID disabled\r\n", i);
-// 				        Manual_Control(i);
-
-// 				        if (pid.params[i].safety_mode > 0) {
-// 				            printf("CH %u Safety mode reset by PID disable command\r\n", i);
-// 				            pid.params[i].safety_mode = 0;
-// 				            Update_Fan_Status(i);
-// 				        }
-// 				    }
-// 				}
-// 				// PID 활성 상태에서 목표 온도 변경
-// 				else if (pid.enable_pid[i] && ((float)system.ctrl_param_now.target_temp[i]/4.0f != pid.params[i].setpoint))
-// 				{
-// 					  float new_target = (float)system.ctrl_param_now.target_temp[i] / 4.0f;
-
-// 					  pid.params[i].setpoint = new_target;
-// 					  if (pid.params[i].setpoint > pid.params[i].max_temp)
-// 					  {
-// 						  pid.params[i].setpoint = pid.params[i].max_temp;
-// 					  }
-// 					  printf("CH %u Target temp updated: %.2f°C\r\n", i, pid.params[i].setpoint);
-// 				}
-// 				// PID가 비활성화된 경우 직접 PWM 및 팬 제어
-// 				if (!pid.enable_pid[i])
-// 				{
-// 					Manual_Control(i);
-// 				}
-// 			}
-// 			LED1_toggle;
-// 			system.ctrl_param_save = system.ctrl_param_now;
-//         }
-// 	}
-// 	else if ((rx_header.Identifier == CAN3_RXID_GAIN_UPDATE) && (rx_header.DataLength == FDCAN_DLC_BYTES_64))
-// 	{
-// 		/* 버퍼 데이터를 PID 튜닝 구조체로 복사 */
-// 	    memcpy(&pid.buf_fdcan_pid_tuning.uint8, rx_data, RX_BYTE_PID_TUNING);
-
-// 	    /* 채널 번호 유효성 검사 */
-// 	    uint8_t ch = pid.buf_fdcan_pid_tuning.struc.channel;
-// 	    if (ch < CTRL_CH)
-// 	    {
-// 	    	/* PID 게인 값 설정 */
-// 	        pid.params[ch].lambda = pid.buf_fdcan_pid_tuning.struc.kp;
-// 	        pid.params[ch].alpha = pid.buf_fdcan_pid_tuning.struc.ki;
-// 	        pid.params[ch].gain = pid.buf_fdcan_pid_tuning.struc.kd;
-// 	        printf("PID Gains updated for CH %u: Kp=%.2f, Ki=%.4f, Kd=%.4f\r\n", ch, pid.params[ch].lambda, pid.params[ch].alpha, pid.params[ch].gain);
-
-// 	        LED2_toggle;  // PID 튜닝 메시지 수신 표시
-// 	        }
-//         else
-//         {
-//         	printf("Error: Invalid channel number %u\r\n", ch);
-//         }
-// 	}
-// }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
