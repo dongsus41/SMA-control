@@ -97,12 +97,30 @@
  */
 typedef struct
 {
-    volatile uint32_t ctrl_tick;            /**< TIM ISR 증가, main atomic swap 리셋 */
-    uint32_t          ctrl_overrun_count;   /**< 누적 오버런 틱 수 (정상 0) */
-    uint32_t          ctrl_overrun_max;     /**< 한 주기 최대 pending (정상 1) */
-    uint32_t          ctrl_loop_hz;         /**< TIM 실제 설정에서 계산된 제어 루프 주파수 (Hz) */
-    uint32_t          ctrl_loop_period_ms;  /**< = 1000 / ctrl_loop_hz, SMA_Init 인자 등에 사용 */
-    uint8_t           state_command;        /**< ESP RX[3] → 모드 인덱스 (0 ~ mode_count-1), EST_SetMode()로 반영 */
+    volatile uint32_t ctrl_tick;            /**< (legacy) TIM ISR 증가 — 본 phase에서 미사용, 후속 정리 */
+    uint32_t          ctrl_overrun_count;   /**< (legacy) */
+    uint32_t          ctrl_overrun_max;     /**< (legacy) */
+    uint32_t          ctrl_loop_hz;         /**< (legacy) */
+    uint32_t          ctrl_loop_period_ms;  /**< (legacy) */
+    uint8_t           state_command;        /**< (legacy) */
+
+    /* ── 두 박자 cooperative 처리용 (Phase 1 신규) ──
+     * fast_tick : TIM4 ISR(~250Hz) 증가, main loop atomic-swap 리셋
+     * slow_tick : TIM5 ISR(~10Hz)  증가, main loop atomic-swap 리셋
+     * volatile 필수 — ISR과 main loop 교차 접근.
+     * `if (>0) { =0; }` 2줄 RMW는 race 가능 → __disable_irq() 짧은 critical section.
+     *
+     * overrun_count / overrun_max : main loop가 한 주기 이상 걸려 여러 틱이
+     * 쌓인 경우 (pending-1)을 누적, 관측된 최대 pending을 기록. catch-up
+     * 실행은 하지 않음(PID dt 왜곡 / I2C burst 회피). 정상 상태에선 count=0,
+     * max≤1. main loop 단독 접근 → volatile 불필요.
+     */
+    volatile uint32_t fast_tick;
+    volatile uint32_t slow_tick;
+    uint32_t          fast_overrun_count;
+    uint32_t          fast_overrun_max;
+    uint32_t          slow_overrun_count;
+    uint32_t          slow_overrun_max;
 } SystemState_t;
 
 extern SystemState_t g_sys;
