@@ -51,6 +51,9 @@ void Sensor_Update(void)
 	{
 		g_state.temp[i] = tmc.temp_ext14_raw[i];
 	}
+
+	/* Phase 5: 로드셀 12ms-cap 폴링 + ring buffer 누적 */
+	LoadCell_Update(&hi2c2, HAL_GetTick());
 }
 
 /* ═══════════════ fast_tick 본체 — Safety 단계 ═══════════════
@@ -155,27 +158,32 @@ void Controller_Update(void)
 
 		case CH_FORCE:
 		{
-			/* 단일 로드셀 — UART 디코더가 1채널 보장.
-			 * I2C로 로드셀 데이터 읽기 + force PID. */
-			LoadCell_Data_TypeDef loadcell;
-			LoadCell_Init(&loadcell);
-			if (LoadCell_Read(&hi2c2, &loadcell) == HAL_OK && loadcell.valid) {
+			/* Phase 5: ring buffer 8샘플 평균 사용. stale 검출 시 안전 차단.
+			 * I2C read 자체는 fast_tick(Sensor_Update)에서 12ms-cap으로 이미 진행 중. */
+			uint32_t now = HAL_GetTick();
+			if (LoadCell_IsStale(now, 100U))  /* 100ms 동안 새 데이터 없으면 stale */
+			{
+				g_ctrl.cmd_pwm[i] = 0;
+				g_ctrl.cmd_fan[i] = 1;
+			}
+			else
+			{
+				float force_avg    = LoadCell_GetAverage();
 				float target_force = (float)g_cmd.target[i] / 10.0f;  /* 0.1g/LSB */
 
 				/* transitional: ForceControl_Calculate가 force_ctrl.force_pid 직접 참조 */
 				force_ctrl.force_pid.target_force = target_force;
 				force_ctrl.force_pid.enabled      = 1;
 
-				float ctrl_output = ForceControl_Calculate(loadcell.force);
+				float ctrl_output = ForceControl_Calculate(force_avg);
 				g_ctrl.cmd_pwm[i] = (uint8_t)ctrl_output;
 				g_ctrl.cmd_fan[i] = 0;
-			} else {
-				/* 센서 에러 시 안전 차단 */
-				g_ctrl.cmd_pwm[i] = 0;
-				g_ctrl.cmd_fan[i] = 1;
 			}
-			/* loadcell 캐시 — UartComm_SendForceState 송신용 transitional */
-			force_ctrl.loadcell = loadcell;
+
+			/* SendForceState 송신용 캐시 갱신 (transitional, Phase 6 정리 예정) */
+			force_ctrl.loadcell.force        = LoadCell_GetAverage();
+			force_ctrl.loadcell.displacement = LoadCell_GetLatestDisp();
+			force_ctrl.loadcell.valid        = !LoadCell_IsStale(now, 100U);
 			break;
 		}
 
