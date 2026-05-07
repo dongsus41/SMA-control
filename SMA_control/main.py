@@ -1,0 +1,388 @@
+import sys
+import csv
+import os
+from datetime import datetime
+from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PyQt5 import uic
+from PyQt5.QtCore import Qt, QTimer
+import pyqtgraph as pg
+
+from uart_driver import UartWorker
+
+# ============================================================
+#  설정
+# ============================================================
+SERIAL_PORT = "COM6"
+SERIAL_BAUD = 115200
+DISPLAY_CH  = 0          # 표시할 채널 (0~5)
+
+MODE_MANUAL = 0
+MODE_TEMP   = 1
+MODE_FORCE  = 2
+
+MAX_PLOT_POINTS = 1000 # 50초 분량 정도
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        uic.loadUi("window.ui", self)
+
+        if not os.path.exists("data_logs"):
+            os.makedirs("data_logs")
+
+        # ── 데이터 저장소 ──
+        self.time_data   = []
+        self.temp_data   = []
+        self.target_data = []
+        self.pwm_data    = []
+
+        self.force_time_data = []
+        self.force_data      = []
+        self.disp_data       = []
+
+        # ── 캐시 ──
+        self.last_temp  = 0.0
+        self.last_pwm   = 0
+        self.last_fan   = False
+        self.last_force = 0.0
+        self.last_disp  = 0.0
+
+        # ── 제어 상태 ──
+        self.ctrl_mode            = MODE_MANUAL
+        self.current_pwm          = 0
+        self.current_fan          = False
+        self.current_pid_mode     = False
+        self.current_target       = 0.0
+        self.current_force_target = 0.0
+
+        # ── 타이머 ──
+        self.tx_timer = QTimer()
+        self.tx_timer.setInterval(100)
+        self.tx_timer.timeout.connect(self.send_heartbeat)
+
+        self.plot_timer = QTimer()
+        self.plot_timer.setInterval(50)
+        self.plot_timer.timeout.connect(self.update_ui)
+
+        # ── UART 워커 ──
+        self.worker = UartWorker(port=SERIAL_PORT, baudrate=SERIAL_BAUD)
+        self.worker.data_received.connect(self.handle_new_data)
+        self.worker.force_received.connect(self.handle_force_data)
+        self.worker.debug_message.connect(self.handle_debug)
+        self.worker.error_occurred.connect(self.handle_error)
+
+        self.init_plots()
+        self.init_controls()
+
+    # ──────────────────────────────────────────────────────────
+    #  그래프 초기화
+    # ──────────────────────────────────────────────────────────
+
+    def init_plots(self):
+        # ── Manual/Temp 페이지 ──
+        self.temp_plot_widget.setTitle("Temperature Monitor", color="w", size="12pt")
+        self.temp_plot_widget.setLabel("left", "Temperature (°C)")
+        self.temp_plot_widget.showGrid(x=True, y=True)
+        self.temp_plot_widget.addLegend()
+        self.temp_line = self.temp_plot_widget.plot(
+            pen=pg.mkPen('y', width=2), name="Current Temp")
+        self.target_line = self.temp_plot_widget.plot(
+            pen=pg.mkPen('r', width=2, style=Qt.DashLine), name="Target Temp")
+
+        self.pwm_plot_widget.setTitle("PWM Output", color="w", size="12pt")
+        self.pwm_plot_widget.setLabel("left", "PWM (%)")
+        self.pwm_plot_widget.setLabel("bottom", "Time (s)")
+        self.pwm_plot_widget.showGrid(x=True, y=True)
+        self.pwm_plot_widget.setYRange(0, 105)
+        self.pwm_plot_widget.setXLink(self.temp_plot_widget)
+        self.pwm_line = self.pwm_plot_widget.plot(
+            pen=pg.mkPen('c', width=2), name="PWM")
+
+        # ── Force 페이지 ──
+        self.force_plot_widget.setTitle("Force Monitor", color="w", size="12pt")
+        self.force_plot_widget.setLabel("left", "Force (g)")
+        self.force_plot_widget.showGrid(x=True, y=True)
+        self.force_plot_widget.addLegend()
+        self.force_line = self.force_plot_widget.plot(
+            pen=pg.mkPen(color='#AA00FF', width=2), name="Force (g)")
+        self.force_target_line = self.force_plot_widget.plot(
+            pen=pg.mkPen(color='#FF4444', width=2, style=Qt.DashLine),
+            name="Target Force")
+
+        self.fpwm_plot_widget.setTitle("PWM Output", color="w", size="12pt")
+        self.fpwm_plot_widget.setLabel("left", "PWM (%)")
+        self.fpwm_plot_widget.showGrid(x=True, y=True)
+        self.fpwm_plot_widget.setYRange(0, 105)
+        self.fpwm_plot_widget.setXLink(self.force_plot_widget)
+        self.fpwm_line = self.fpwm_plot_widget.plot(
+            pen=pg.mkPen('c', width=2), name="PWM")
+
+        self.ftemp_plot_widget.setTitle("Temperature", color="w", size="12pt")
+        self.ftemp_plot_widget.setLabel("left", "Temperature (°C)")
+        self.ftemp_plot_widget.setLabel("bottom", "Time (s)")
+        self.ftemp_plot_widget.showGrid(x=True, y=True)
+        self.ftemp_plot_widget.setXLink(self.force_plot_widget)
+        self.ftemp_line = self.ftemp_plot_widget.plot(
+            pen=pg.mkPen('y', width=2), name="Temp")
+
+    # ──────────────────────────────────────────────────────────
+    #  버튼/라디오 초기화
+    # ──────────────────────────────────────────────────────────
+
+    def init_controls(self):
+        self.radio_manual.toggled.connect(self.on_mode_changed)
+        self.radio_temp.toggled.connect(self.on_mode_changed)
+        self.radio_force.toggled.connect(self.on_mode_changed)
+
+        self.btn_apply.clicked.connect(self.apply_settings)
+        self.btn_start.clicked.connect(self.start_system)
+        self.btn_stop.clicked.connect(self.emergency_stop)
+        self.btn_save.clicked.connect(self.manual_save)
+
+        self.on_mode_changed()
+
+    def on_mode_changed(self):
+        manual = self.radio_manual.isChecked()
+        temp   = self.radio_temp.isChecked()
+        force  = self.radio_force.isChecked()
+
+        self.widget_manual.setVisible(manual)
+        self.widget_pid.setVisible(temp)
+        self.widget_force.setVisible(force)
+
+        self.plot_stack.setCurrentIndex(1 if force else 0)
+
+        if manual:
+            self.ctrl_mode = MODE_MANUAL
+        elif temp:
+            self.ctrl_mode = MODE_TEMP
+        else:
+            self.ctrl_mode = MODE_FORCE
+
+    # ──────────────────────────────────────────────────────────
+    #  시스템 제어
+    # ──────────────────────────────────────────────────────────
+
+    def start_system(self):
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.btn_apply.setEnabled(True)
+
+        if not self.worker.isRunning():
+            self.worker.start()
+
+        self.apply_settings()
+        self.tx_timer.start()
+        self.plot_timer.start()
+
+        print(f"System Started. Mode={self.ctrl_mode}  "
+              f"(UART: {SERIAL_PORT} @ {SERIAL_BAUD}baud)")
+
+    def apply_settings(self):
+        if self.ctrl_mode == MODE_MANUAL:
+            self.current_pwm      = self.spin_pwm.value()
+            self.current_fan      = self.chk_fan.isChecked()
+            self.current_pid_mode = False
+            # 혹시 이전에 Force 모드였다면 해제
+            self.worker.send_force_control_message(
+                channel=DISPLAY_CH, enable=False, target_force=0.0)
+            print(f"Applied: Manual  PWM={self.current_pwm}  FAN={self.current_fan}")
+
+        elif self.ctrl_mode == MODE_TEMP:
+            self.current_target   = self.spin_target.value()
+            self.current_pid_mode = True
+            # 혹시 이전에 Force 모드였다면 해제
+            self.worker.send_force_control_message(
+                channel=DISPLAY_CH, enable=False, target_force=0.0)
+            print(f"Applied: Temp PID  Target={self.current_target}°C")
+
+        else:  # MODE_FORCE
+            self.current_force_target = self.spin_target_force.value()
+            self.current_pid_mode     = False
+            self.current_pwm          = 0
+            # MCU에 힘 제어 모드 활성화 명령 전송
+            self.worker.send_force_control_message(
+                channel=DISPLAY_CH,
+                enable=True,
+                target_force=self.current_force_target)
+            print(f"Applied: Force Ctrl  Target={self.current_force_target}g  "
+                  f"CH={DISPLAY_CH}")
+
+    def send_heartbeat(self):
+        """Force 모드일 때는 온도 제어 heartbeat 전송 안 함"""
+        if self.ctrl_mode != MODE_FORCE:
+            self.worker.send_control_message(
+                pwm=self.current_pwm,
+                fan_on=self.current_fan,
+                pid_enable=self.current_pid_mode,
+                target_temp=self.current_target
+            )
+
+    def stop_all(self):
+        self.worker.running = False
+        self.worker.wait()
+        self.tx_timer.stop()
+        self.plot_timer.stop()
+
+    def emergency_stop(self):
+        print("!!! EMERGENCY STOP !!!")
+        self.current_pwm      = 0
+        self.current_fan      = False
+        self.current_pid_mode = False
+        self.current_target   = 0.0
+
+        # 모든 모드 해제
+        self.worker.send_force_control_message(
+            channel=DISPLAY_CH, enable=False, target_force=0.0)
+        self.worker.send_control_message(
+            pwm=0, fan_on=False, pid_enable=False, target_temp=0.0)
+
+        self.tx_timer.stop()
+        self.plot_timer.stop()
+
+        for sig, slot in [(self.worker.data_received,  self.handle_new_data),
+                          (self.worker.force_received, self.handle_force_data)]:
+            try:
+                sig.disconnect(slot)
+            except Exception:
+                pass
+
+        self.btn_stop.setText("STOPPED")
+        self.btn_stop.setEnabled(False)
+        self.btn_apply.setEnabled(False)
+        self.btn_start.setEnabled(False)
+
+        self.lbl_pwm.setText("PWM: 0% (STOP)")
+        self.lbl_pwm.setStyleSheet("font-size: 18px; font-weight: bold; color: red;")
+
+        QMessageBox.warning(self, "System Stopped",
+            "Emergency Stop! Use 'SAVE DATA' button to save logs.")
+
+    def closeEvent(self, event):
+        self.stop_all()
+        event.accept()
+
+    # ──────────────────────────────────────────────────────────
+    #  데이터 수신
+    # ──────────────────────────────────────────────────────────
+
+    def handle_new_data(self, elapsed, temp_list, fan_list, pwm_list):
+        print(f"Data Recieved: {temp_list[DISPLAY_CH]}") #디버깅용
+        ch   = DISPLAY_CH
+        temp = temp_list[ch]
+        fan  = fan_list[ch]
+        pwm  = pwm_list[ch]
+
+        self.time_data.append(elapsed)
+        self.temp_data.append(temp)
+        self.pwm_data.append(pwm)
+        self.target_data.append(
+            self.current_target if self.current_pid_mode else float('nan'))
+
+        self.last_temp = temp
+        self.last_pwm  = pwm
+        self.last_fan  = bool(fan)
+
+    def handle_force_data(self, elapsed, force, displacement):
+        self.force_time_data.append(elapsed)
+        self.force_data.append(force)
+        self.disp_data.append(displacement)
+        self.last_force = force
+        self.last_disp  = displacement
+
+    def handle_debug(self, msg):
+        print(f"[MCU] {msg}")
+
+    def handle_error(self, msg):
+        print(f"[ERROR] {msg}")
+
+    # ──────────────────────────────────────────────────────────
+    #  UI 업데이트 (20 Hz)
+    # ──────────────────────────────────────────────────────────
+
+    def update_ui(self):
+        # ── 공통 상태 라벨 ──
+        self.lbl_temp.setText(f"{self.last_temp:.1f} °C")
+        self.lbl_pwm.setText(f"PWM: {self.last_pwm}%")
+        self.lbl_force.setText(f"Force: {self.last_force:.2f} g")
+        self.lbl_disp.setText(f"Disp:  {self.last_disp:.2f} mm")
+
+        if self.last_temp > 70.0:
+            self.lbl_temp.setStyleSheet(
+                "font-size: 28px; font-weight: bold; color: red;")
+        else:
+            self.lbl_temp.setStyleSheet(
+                "font-size: 28px; font-weight: bold; color: #2196F3;")
+
+        self.lbl_fan.setText("FAN: ON" if self.last_fan else "FAN: OFF")
+        self.lbl_fan.setStyleSheet(
+            f"font-size: 18px; font-weight: bold; "
+            f"color: {'green' if self.last_fan else 'gray'};")
+
+        # ── Manual / Temp 그래프 ──
+        if self.ctrl_mode in (MODE_MANUAL, MODE_TEMP) and self.time_data:
+            # 전체 리스트 중 최근 MAX_PLOT_POINTS 개수만 잘라서 그리기
+            plot_time = self.time_data[-MAX_PLOT_POINTS:]
+            self.temp_line.setData(plot_time, self.temp_data[-MAX_PLOT_POINTS:])
+            self.target_line.setData(plot_time, self.target_data[-MAX_PLOT_POINTS:])
+            self.pwm_line.setData(plot_time, self.pwm_data[-MAX_PLOT_POINTS:])
+
+        # ── Force 그래프 ──
+        if self.ctrl_mode == MODE_FORCE:
+            if self.force_time_data:
+                plot_ftime = self.force_time_data[-MAX_PLOT_POINTS:]
+                self.force_line.setData(plot_ftime, self.force_data[-MAX_PLOT_POINTS:])
+                
+                # 타겟 라인도 화면에 보이는 시간(t0 ~ t1)에 맞게 조정
+                t0, t1 = plot_ftime[0], plot_ftime[-1]
+                self.force_target_line.setData(
+                    [t0, t1],
+                    [self.current_force_target, self.current_force_target])
+                    
+            if self.time_data:
+                plot_time = self.time_data[-MAX_PLOT_POINTS:]
+                self.fpwm_line.setData(plot_time, self.pwm_data[-MAX_PLOT_POINTS:])
+                self.ftemp_line.setData(plot_time, self.temp_data[-MAX_PLOT_POINTS:])
+
+    # ──────────────────────────────────────────────────────────
+    #  저장
+    # ──────────────────────────────────────────────────────────
+
+    def manual_save(self):
+        user_input    = self.edit_filename.text().strip()
+        filename_base = user_input if user_input else \
+            f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        try:
+            with open(f"data_logs/{filename_base}.csv",
+                      mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Time(sec)", "Temperature(C)", "PWM(%)"])
+                for i in range(len(self.time_data)):
+                    writer.writerow([f"{self.time_data[i]:.3f}",
+                                     f"{self.temp_data[i]:.2f}",
+                                     self.pwm_data[i]])
+
+            with open(f"data_logs/{filename_base}_force.csv",
+                      mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Time(sec)", "Force(g)", "Displacement(mm)"])
+                for i in range(len(self.force_time_data)):
+                    writer.writerow([f"{self.force_time_data[i]:.3f}",
+                                     f"{self.force_data[i]:.3f}",
+                                     f"{self.disp_data[i]:.3f}"])
+
+            self.grab().save(f"data_logs/{filename_base}.png", 'png')
+            QMessageBox.information(self, "Save Success",
+                f"Saved to data_logs/{filename_base}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
