@@ -202,6 +202,71 @@ static void do_fast_tick(void)
 	}
 }
 
+/* ═══════════════ TIM5 (slow tick, ~10Hz) 본체 ═══════════════
+ * Phase 1: 기존 TIM5 ISR 본체 그대로 main loop로 이동.
+ * 의미 변경 없음.
+ *
+ * startup_counter는 함수 내 static으로 보존 — 기존 ISR 내 static과 동일 동작.
+ */
+static void do_slow_tick(void)
+{
+	static uint8_t startup_counter = 0;
+	if (pid.startup_phase) {
+	    startup_counter++;
+	    if (startup_counter >= 10) {  // 10번의 slow_tick 후 (약 1초)
+	        pid.startup_phase = 0;
+	        startup_counter = 0;
+	    }
+	}
+
+	for (uint8_t i = 0; i < CTRL_CH; i++)
+	{
+		// ★ 힘 제어
+		if (force_ctrl.mode == CTRL_MODE_FORCE && force_ctrl.force_pid.enabled && i == force_ctrl.active_channel)
+		{
+			// I2C로 로드셀 데이터 읽기
+			LoadCell_Read(&hi2c2, &force_ctrl.loadcell);
+
+			if (force_ctrl.loadcell.valid)
+			{
+				float ctrl_output = ForceControl_Calculate(force_ctrl.loadcell.force);
+				Set_PWM_Output(i, (uint8_t)ctrl_output);
+			}
+			else
+			{
+				// 센서 에러 시 안전 장치
+				Set_PWM_Output(i, 0);
+			}
+			continue; // 이 채널은 온도제어 건너뜀
+		}
+
+		// ★ 온도제어
+		// 1. 안전 온도 확인 (최우선 처리)
+		bool in_safety_mode = Check_Safety_Temperature(i, pid.shared_data.temp_data[i]);
+
+		// 2. PID 활성화 상태 및 안전 모드 확인
+		if (pid.enable_pid[i] && !in_safety_mode)
+		{
+			float current_temp = pid.shared_data.temp_data[i];
+			float target_temp  = pid.params[i].setpoint;
+
+			// 센서 이상 확인
+			// bool sensor_ok = Check_Temperature_Rise_Rate(i, current_temp);
+			bool sensor_ok = true; // 온도 상승 안전모드 일단 주석처리
+
+			if (sensor_ok)
+			{
+				// 제어 연산 수행
+				float ctrl_output = Calculate_Ctrl(&pid.params[i], current_temp, i);
+				Set_PWM_Output(i, (uint8_t)ctrl_output);
+
+				// 온도 기반 팬 제어
+				Control_Fan_By_Temperature(i, current_temp, target_temp);
+			}
+		}
+	}
+}
+
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
@@ -212,61 +277,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 	else if(htim->Instance == htim5.Instance)
 	{
-		static uint8_t startup_counter = 0;
-		if (pid.startup_phase) {
-		    startup_counter++;
-		    if (startup_counter >= 10) {  // 10번의 TIM5 인터럽트 후 (약 1초)
-		        pid.startup_phase = 0;
-		        startup_counter = 0;
-		    }
-		}
-
-    for (uint8_t i = 0; i < CTRL_CH; i++)
-		{
-      // ★ 힘 제어
-      if (force_ctrl.mode == CTRL_MODE_FORCE && force_ctrl.force_pid.enabled && i==force_ctrl.active_channel)
-      {
-        // I2C로 로드셀 데이터 읽기
-        LoadCell_Read(&hi2c2, &force_ctrl.loadcell);
-
-        if (force_ctrl.loadcell.valid)
-        {
-          float ctrl_output = ForceControl_Calculate(force_ctrl.loadcell.force);
-          Set_PWM_Output(i, (uint8_t)ctrl_output);
-        }
-        else
-        {
-          // 센서 에러 시 안전 장치
-          Set_PWM_Output(i, 0);
-        }
-        continue; // 이 채널은 온도제어 건너뜀
-      }
-
-      // ★ 온도제어
-      // 1. 안전 온도 확인 (최우선 처리)
-      bool in_safety_mode = Check_Safety_Temperature(i, pid.shared_data.temp_data[i]);
-
-      // 2. PID 활성화 상태 및 안전 모드 확인
-      if (pid.enable_pid[i] && !in_safety_mode)
-      {
-        float current_temp = pid.shared_data.temp_data[i];
-        float target_temp = pid.params[i].setpoint;
-
-        //센서 이상 확인
-        //bool sensor_ok = Check_Temperature_Rise_Rate(i, current_temp);
-        bool sensor_ok = true; // 온도 상승 안전모드 일단 주석처리
-
-        if (sensor_ok)
-        {
-          // 제어 연산 수행
-          float ctrl_output = Calculate_Ctrl(&pid.params[i], current_temp, i);
-  				Set_PWM_Output(i, (uint8_t)ctrl_output);
-
-					// 5. 온도 기반 팬 제어
-					Control_Fan_By_Temperature(i, current_temp, target_temp);
-        }
-      }
-    }
+		g_sys.slow_tick++;
 	}
 }
 
@@ -410,6 +421,28 @@ int main(void)
 			}
 
 			do_fast_tick();
+		}
+
+		/* ── slow_tick 처리 (~10Hz) ── */
+		if (g_sys.slow_tick > 0U)
+		{
+			uint32_t pending;
+
+			__disable_irq();
+			pending          = g_sys.slow_tick;
+			g_sys.slow_tick  = 0U;
+			__enable_irq();
+
+			if (pending > 1U)
+			{
+				g_sys.slow_overrun_count += (pending - 1U);
+				if (pending > g_sys.slow_overrun_max)
+				{
+					g_sys.slow_overrun_max = pending;
+				}
+			}
+
+			do_slow_tick();
 		}
 	}
   /* USER CODE END 3 */
