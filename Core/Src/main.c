@@ -283,7 +283,7 @@ int main(void)
 	HAL_TIM_Base_Start_IT(&htim4);
 	HAL_TIM_Base_Start_IT(&htim5);
 	
-	Init_Controller();  /* Phase 4: g_ctrl.temp_params + g_cmd 초기화 (Init_PID_Controllers / ForceControl_Init 내부 호출) */
+	Init_Controller();  /* g_ctrl.temp_params + g_ctrl.force_params + g_cmd 초기화 */
 
 //	system.state_level = SYSTEM_READY;
 	system.state_level = SYSTEM_GO;

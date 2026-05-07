@@ -60,9 +60,8 @@ static inline uint8_t uart_rx_fifo_pop(uint8_t *out)
     return 1;
 }
 
-extern System_typedef       system;     /* state_level 용 (Phase 6에서 정리) */
-extern ForceControl_TypeDef force_ctrl; /* SendForceState transitional */
-extern I2C_HandleTypeDef    hi2c2;      /* I2C Test (CMD 0x06) 용 */
+extern System_typedef    system;     /* state_level 용 (Phase 6에서 슬림화 후 유지) */
+extern I2C_HandleTypeDef hi2c2;      /* I2C Test (CMD 0x06) 용 */
 
 /*******************************************************************************
  * CRC-8 (polynomial 0x07, init 0x00)
@@ -238,12 +237,15 @@ void UartComm_SendForceState(void)
     }
     if (force_ch < 0) return;
 
+    /* Phase 6: ring buffer에서 직접 읽음 (force_ctrl.loadcell 캐시 제거됨) */
+    float force = LoadCell_GetAverage();
+    float disp  = LoadCell_GetLatestDisp();
+
     uint8_t payload[FORCE_STATE_PAYLOAD_SIZE];
     payload[0] = CH_FORCE;
     payload[1] = (uint8_t)force_ch;
-    /* force_ctrl.loadcell 캐시 사용 — Controller_Update가 read한 latest 값 (transitional) */
-    memcpy(&payload[2], (void*)&force_ctrl.loadcell.force, 4);
-    memcpy(&payload[6], (void*)&force_ctrl.loadcell.displacement, 4);
+    memcpy(&payload[2], &force, 4);
+    memcpy(&payload[6], &disp,  4);
     UartComm_SendFrame(CMD_FORCE_STATE, payload, FORCE_STATE_PAYLOAD_SIZE);
 }
 

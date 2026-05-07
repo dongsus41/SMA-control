@@ -11,9 +11,8 @@ cmd_param_t   g_cmd;
 ctrl_state_t  g_ctrl;
 state_buf_t   g_state;
 
-/* 기존 글로벌 (Phase 6에서 일부 정리 — system은 슬림화 후 유지) */
+/* 기존 글로벌 (Phase 6에서 system은 슬림화 후 유지, force_ctrl/pid 제거됨) */
 extern System_typedef            system;        /* state_level, pnt_pwm */
-extern ForceControl_TypeDef      force_ctrl;    /* Phase 6 Task 3에서 제거 예정 */
 extern MAX31855_typedef          tmc;
 extern I2C_HandleTypeDef         hi2c2;
 
@@ -38,8 +37,19 @@ void Init_Controller(void)
 		g_ctrl.temp_params[i].sensor_error_temp = 200.0f;
 	}
 
-	/* force_params 초기화는 Task 3에서 추가 — 현재는 ForceControl_Init이 force_ctrl 채움 */
-	ForceControl_Init();
+	/* g_ctrl.force_params[] 초기값 (기존 ForceControl_Init과 동일 값) */
+	for (uint8_t i = 0; i < CTRL_CH; i++) {
+		g_ctrl.force_params[i].kp           = 2.0f;
+		g_ctrl.force_params[i].ki           = 0.5f;
+		g_ctrl.force_params[i].kd           = 0.1f;
+		g_ctrl.force_params[i].target_force = 0.0f;
+		g_ctrl.force_params[i].integral     = 0.0f;
+		g_ctrl.force_params[i].last_error   = 0.0f;
+		g_ctrl.force_params[i].output_min   = 0.0f;
+		g_ctrl.force_params[i].output_max   = 100.0f;
+		g_ctrl.force_params[i].max_force    = 500.0f;
+		g_ctrl.force_params[i].enabled      = 0;
+	}
 
 	/* 부팅 시 모든 채널 OFF */
 	for (uint8_t i = 0; i < CTRL_CH; i++) {
@@ -165,32 +175,24 @@ void Controller_Update(void)
 
 		case CH_FORCE:
 		{
-			/* Phase 5: ring buffer 8샘플 평균 사용. stale 검출 시 안전 차단.
-			 * I2C read 자체는 fast_tick(Sensor_Update)에서 12ms-cap으로 이미 진행 중. */
+			/* Phase 5 ring buffer 평균 + Phase 6 글로벌 직접 참조 (g_ctrl.force_params[i]). */
 			uint32_t now = HAL_GetTick();
-			if (LoadCell_IsStale(now, 100U))  /* 100ms 동안 새 데이터 없으면 stale */
+			if (LoadCell_IsStale(now, 100U))
 			{
 				g_ctrl.cmd_pwm[i] = 0;
 				g_ctrl.cmd_fan[i] = 1;
 			}
 			else
 			{
-				float force_avg    = LoadCell_GetAverage();
-				float target_force = (float)g_cmd.target[i] / 10.0f;  /* 0.1g/LSB */
+				float force_avg = LoadCell_GetAverage();
+				g_ctrl.force_params[i].target_force = (float)g_cmd.target[i] / 10.0f;  /* 0.1g/LSB */
+				g_ctrl.force_params[i].enabled      = 1;
 
-				/* transitional: ForceControl_Calculate가 force_ctrl.force_pid 직접 참조 */
-				force_ctrl.force_pid.target_force = target_force;
-				force_ctrl.force_pid.enabled      = 1;
-
-				float ctrl_output = ForceControl_Calculate(force_avg);
+				float ctrl_output = ForceControl_Calculate(force_avg, i);
 				g_ctrl.cmd_pwm[i] = (uint8_t)ctrl_output;
 				g_ctrl.cmd_fan[i] = 0;
 			}
-
-			/* SendForceState 송신용 캐시 갱신 (transitional, Phase 6 정리 예정) */
-			force_ctrl.loadcell.force        = LoadCell_GetAverage();
-			force_ctrl.loadcell.displacement = LoadCell_GetLatestDisp();
-			force_ctrl.loadcell.valid        = !LoadCell_IsStale(now, 100U);
+			/* SendForceState는 LoadCell_Get* 직접 호출 (force_ctrl.loadcell 캐시 제거됨) */
 			break;
 		}
 
