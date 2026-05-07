@@ -444,6 +444,12 @@ int main(void)
 
 			do_slow_tick();
 		}
+
+		/* ── UART RX 처리 ──
+		 * ISR이 ring buffer에 누적한 byte를 소비.
+		 * Frame 완성 시 PID/Manual/Force 명령 처리 (printf, I2C 포함).
+		 */
+		UartComm_Process();
 	}
   /* USER CODE END 3 */
 }
