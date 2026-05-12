@@ -87,27 +87,27 @@ void Safety_Update(void)
 		float t = tmc.temp_ext14[i];
 		uint8_t mode = g_ctrl.safety_mode[i];
 
-		if (t > 200.0f || t < -50.0f) {
-			mode = 3;  /* sensor error */
+		if (t > SAFETY_TEMP_SENSOR_HI || t < SAFETY_TEMP_SENSOR_LO) {
+			mode = SAFETY_MODE_SENSOR_ERR;
 		}
-		else if (mode == 3) {
-			/* 센서 정상 복귀 시 mode 0으로 */
-			mode = 0;
+		else if (mode == SAFETY_MODE_SENSOR_ERR) {
+			/* 센서 정상 복귀 시 normal로 */
+			mode = SAFETY_MODE_NORMAL;
 		}
 
-		if (mode != 3) {
-			if (t >= 120.0f) {
-				mode = 2;
+		if (mode != SAFETY_MODE_SENSOR_ERR) {
+			if (t >= SAFETY_TEMP_CRITICAL) {
+				mode = SAFETY_MODE_CRITICAL;
 			}
-			else if (mode == 2 && t <= 30.0f) {
-				mode = 0;
+			else if (mode == SAFETY_MODE_CRITICAL && t <= SAFETY_TEMP_CRIT_HYST) {
+				mode = SAFETY_MODE_NORMAL;
 			}
-			else if (mode != 2) {
-				if (t >= 80.0f) {
-					mode = 1;
+			else if (mode != SAFETY_MODE_CRITICAL) {
+				if (t >= SAFETY_TEMP_WARN) {
+					mode = SAFETY_MODE_WARN;
 				}
-				else if (mode == 1 && t < 75.0f) {
-					mode = 0;
+				else if (mode == SAFETY_MODE_WARN && t < SAFETY_TEMP_WARN_HYST) {
+					mode = SAFETY_MODE_NORMAL;
 				}
 			}
 		}

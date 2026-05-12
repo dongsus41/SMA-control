@@ -125,5 +125,25 @@ typedef struct
 
 extern SystemState_t g_sys;
 
+/* ── Safety mode 레벨 ── */
+#define SAFETY_MODE_NORMAL      0
+#define SAFETY_MODE_WARN        1
+#define SAFETY_MODE_CRITICAL    2
+#define SAFETY_MODE_SENSOR_ERR  3
+
+/* ── Safety 온도 임계값 ── */
+#define SAFETY_TEMP_WARN        80.0f
+#define SAFETY_TEMP_WARN_HYST   75.0f   /* warn → normal 복구 히스테리시스 */
+#define SAFETY_TEMP_CRITICAL    120.0f
+#define SAFETY_TEMP_CRIT_HYST   30.0f   /* critical → normal 복구 히스테리시스 */
+#define SAFETY_TEMP_SENSOR_HI   200.0f
+#define SAFETY_TEMP_SENSOR_LO   -50.0f
+
+/* ── Fan 송신 코드 (CMD 0x02 fan[i] 매립) ── */
+#define FAN_CODE_OFF            0
+#define FAN_CODE_ON             1
+#define FAN_CODE_WARN           17
+#define FAN_CODE_SENSOR_ERR     49
+
 #endif
 

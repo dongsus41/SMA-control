@@ -5,16 +5,6 @@
 #include <stdbool.h>
 #include "system_defs.h"
 
-/* Fan 상태값 정의 (CMD 0x02 fan[i] 매립 코드) */
-#define FAN_OFF              0   /* 팬 꺼짐 (정상 모드) */
-#define FAN_ON               1   /* 팬 켜짐 (정상 모드) */
-#define FAN_SAFETY_LEVEL1    17  /* 1단계 안전 모드 (80°C 초과) */
-#define FAN_SENSOR_ERROR     49  /* 센서 오류 모드 (200°C 초과 또는 -50°C 미만) */
-
-/* Safety 임계값 */
-#define SAFETY_LIMIT_TEMP    80.0f  /* 1단계 안전 모드 진입 (°C) */
-#define SAFETY_TARGET_TEMP   70.0f  /* 1단계 안전 모드 복구 (히스테리시스) */
-
 /* Fan ON/OFF 제어 임계값 (target 대비 차이, °C) */
 #define TEMP_HIGH_THRESHOLD 8.0f    /* current >= target+8.0 → fan ON */
 #define TEMP_LOW_THRESHOLD  5.0f    /* current <= target+5.0 → fan OFF */

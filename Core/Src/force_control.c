@@ -5,6 +5,15 @@ float ForceControl_Calculate(float current_force, uint8_t channel)
 {
     Force_PID_TypeDef* p = &g_ctrl.force_params[channel];
 
+    /* safety_mode CRITICAL 이상이면 integral 리셋 후 즉시 반환.
+     * Actuator_Apply가 어차피 PWM을 0으로 강제하지만, 여기서도 차단해
+     * 안전 모드 해제 직후 integral windup으로 PWM이 튀는 것을 방지. */
+    if (g_ctrl.safety_mode[channel] >= SAFETY_MODE_CRITICAL) {
+        p->integral   = 0.0f;
+        p->last_error = 0.0f;
+        return 0.0f;
+    }
+
     float error = p->target_force - current_force;
 
     /* 적분항 (anti-windup) */
