@@ -166,8 +166,6 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  pid.startup_phase = 1;
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
