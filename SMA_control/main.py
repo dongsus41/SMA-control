@@ -1,3 +1,4 @@
+import time
 import sys
 import csv
 import os
@@ -8,17 +9,28 @@ from PyQt5.QtCore import Qt, QTimer
 import pyqtgraph as pg
 
 from uart_driver import UartWorker, CH_OFF, CH_MANUAL, CH_TEMP, CH_FORCE
-
+from imu_driver import ImuWorker
+from force_mapper import ForceMapper
 # ============================================================
 #  설정
 # ============================================================
+ENABLE_UART = False
 SERIAL_PORT = "COM6"
 SERIAL_BAUD = 115200
 DISPLAY_CH  = 0          # 표시할 채널 (0~5)
 
+
+# 🌟 [추가] IMU 포트 설정 (윈도우 환경이시면 장치관리자 확인 후 'COMx'로 변경 필요)
+IMU_PORT = "/dev/ttyUSB0" 
+IMU_BAUD = 921600
+
 MODE_MANUAL = 0
 MODE_TEMP   = 1
 MODE_FORCE  = 2
+MODE_MANUAL = 0
+MODE_TEMP   = 1
+MODE_FORCE  = 2
+MODE_CALIB  = 3
 
 MAX_PLOT_POINTS = 1000 # 50초 분량 정도
 
@@ -40,6 +52,17 @@ class MainWindow(QMainWindow):
         self.force_time_data = []
         self.force_data      = []
         self.disp_data       = []
+        
+                
+        self.angle_data = []         # 🌟 각도 데이터용 리스트
+        self.target_force_data = []  # 🌟 타겟 힘 데이터용 리스트
+        
+        
+        #IMUtest용 
+        self.imu_time_data = []
+        self.imu_target_data = []
+        self.imu_angle_data = []
+        self.imu_start_time = time.time()
 
         # ── 캐시 ──
         self.last_temp  = 0.0
@@ -47,6 +70,10 @@ class MainWindow(QMainWindow):
         self.last_fan   = False
         self.last_force = 0.0
         self.last_disp  = 0.0
+        
+        
+        self.last_angle = 0.0
+        self.last_velocity = 0.0
 
         # ── 제어 상태 ──
         self.ctrl_mode            = MODE_MANUAL
@@ -55,6 +82,9 @@ class MainWindow(QMainWindow):
         self.current_pid_mode     = False
         self.current_target       = 0.0
         self.current_force_target = 0.0
+        
+        # 🌟 [추가] Force 제어 로깅 활성화 플래그
+        self.is_force_logging     = False
 
         # ── 타이머 ──
         self.tx_timer = QTimer()
@@ -66,14 +96,59 @@ class MainWindow(QMainWindow):
         self.plot_timer.timeout.connect(self.update_ui)
 
         # ── UART 워커 ──
-        self.worker = UartWorker(port=SERIAL_PORT, baudrate=SERIAL_BAUD)
-        self.worker.data_received.connect(self.handle_new_data)
-        self.worker.force_received.connect(self.handle_force_data)
-        self.worker.debug_message.connect(self.handle_debug)
-        self.worker.error_occurred.connect(self.handle_error)
+        self.worker = None  # 🌟 [추가] 기본값을 None으로 둠
 
+        if ENABLE_UART:     # 🌟 [추가] 스위치가 켜져 있을 때만 워커 생성 및 연결
+            self.worker = UartWorker(port=SERIAL_PORT, baudrate=SERIAL_BAUD)
+            self.worker.data_received.connect(self.handle_new_data)
+            self.worker.force_received.connect(self.handle_force_data)
+            self.worker.debug_message.connect(self.handle_debug)
+            self.worker.error_occurred.connect(self.handle_error)
+        
+        # 🌟 [추가] IMU 워커 초기화 및 시그널 연결
+        self.imu_worker = ImuWorker(port=IMU_PORT, baudrate=IMU_BAUD)
+        self.imu_worker.angle_received.connect(self.handle_imu_angle)
+        self.imu_worker.error_occurred.connect(self.handle_error)
+        
+        # 🌟 [추가] Force Mapper 초기화 
+        self.force_mapper = ForceMapper(max_force=100.0, v_lift=-120.0, v_lower=120.0)
+        
         self.init_plots()
         self.init_controls()
+        
+# 🌟 [수정] 각도와 더불어 각속도(velocity)도 인자로 받는다.
+    def handle_imu_angle(self, angle, velocity):
+        
+        self.last_angle = angle
+        self.last_velocity = velocity
+        
+        if self.ctrl_mode == MODE_FORCE:
+            mapped_force = self.force_mapper.get_target_force(angle, velocity)
+            self.current_force_target = mapped_force
+            
+            self.spin_target_force.blockSignals(True)
+            self.spin_target_force.setValue(mapped_force)
+            self.spin_target_force.blockSignals(False)
+            
+            # 🌟 [수정] 로깅 플래그가 켜져 있을 때만 리스트에 데이터 추가
+            if self.is_force_logging:
+                elapsed = time.time() - self.imu_start_time
+                self.imu_time_data.append(elapsed)
+                self.imu_target_data.append(mapped_force)
+                self.imu_angle_data.append(angle)
+    
+    
+    # 🌟 [추가] PyQt5 키보드 이벤트 핸들러
+    def keyPressEvent(self, event):
+        # 누른 키가 'C' 또는 'c' 인지 확인
+        if event.key() == Qt.Key_C:
+            # IMU 워커가 켜져 있을 때만 영점 재설정 명령 하달
+            if hasattr(self, 'imu_worker') and self.imu_worker.isRunning():
+                self.imu_worker.trigger_calibration()
+                print("\n[캘리브레이션] 차렷 자세 0점 재설정 완료! 🎯\n")
+        else:
+            # 다른 키 입력은 PyQt5 기본 동작으로 넘김
+            super().keyPressEvent(event)
 
     # ──────────────────────────────────────────────────────────
     #  그래프 초기화
@@ -134,11 +209,13 @@ class MainWindow(QMainWindow):
         self.radio_manual.toggled.connect(self.on_mode_changed)
         self.radio_temp.toggled.connect(self.on_mode_changed)
         self.radio_force.toggled.connect(self.on_mode_changed)
+        self.radio_calib.toggled.connect(self.on_mode_changed)
 
         self.btn_apply.clicked.connect(self.apply_settings)
         self.btn_start.clicked.connect(self.start_system)
         self.btn_stop.clicked.connect(self.emergency_stop)
         self.btn_save.clicked.connect(self.manual_save)
+        self.btn_calib.clicked.connect(self.calibrate_imu)
 
         self.on_mode_changed()
 
@@ -146,19 +223,24 @@ class MainWindow(QMainWindow):
         manual = self.radio_manual.isChecked()
         temp   = self.radio_temp.isChecked()
         force  = self.radio_force.isChecked()
+        calib  = self.radio_calib.isChecked() # 🌟 추가
 
         self.widget_manual.setVisible(manual)
         self.widget_pid.setVisible(temp)
         self.widget_force.setVisible(force)
+        self.widget_calib.setVisible(calib)   # 🌟 추가
 
+        # 캘리브레이션 모드일 때는 기본 플롯(Manual/Temp) 화면을 띄워놓음
         self.plot_stack.setCurrentIndex(1 if force else 0)
 
         if manual:
             self.ctrl_mode = MODE_MANUAL
         elif temp:
             self.ctrl_mode = MODE_TEMP
-        else:
+        elif force:
             self.ctrl_mode = MODE_FORCE
+        else:
+            self.ctrl_mode = MODE_CALIB       # 🌟 추가
 
     # ──────────────────────────────────────────────────────────
     #  시스템 제어
@@ -169,9 +251,20 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.btn_apply.setEnabled(True)
 
-        if not self.worker.isRunning():
+        # 🌟 [수정] worker가 존재할 때만 시작
+        if self.worker and not self.worker.isRunning():
             self.worker.start()
-
+            
+        if hasattr(self, 'imu_worker'):
+            if not self.imu_worker.isRunning():
+                # 끊었던 시그널 다시 연결
+                try:
+                    self.imu_worker.angle_received.connect(self.handle_imu_angle)
+                except TypeError:
+                    pass # 이미 연결되어 있으면 무시
+                
+                self.imu_worker.start()
+                
         self.apply_settings()
         self.tx_timer.start()
         self.plot_timer.start()
@@ -192,17 +285,38 @@ class MainWindow(QMainWindow):
             self.current_pid_mode = True
             print(f"Applied: Temp PID  Target={self.current_target}°C")
 
-        else:  # MODE_FORCE
+        elif self.ctrl_mode == MODE_FORCE:
             self.current_force_target = self.spin_target_force.value()
             self.current_pid_mode     = False
             self.current_pwm          = 0
-            print(f"Applied: Force Ctrl  Target={self.current_force_target}g  "
-                  f"CH={DISPLAY_CH}")
+            print(f"Applied: Force Ctrl  Target={self.current_force_target}g  CH={DISPLAY_CH}")
+            
+            # 🌟 [추가] Apply 버튼을 누르는 순간 기존 데이터를 초기화하고 기록 시작
+            self.force_time_data.clear()
+            self.force_data.clear()
+            self.disp_data.clear()
+            self.angle_data.clear()
+            self.target_force_data.clear()
+            
+            self.imu_time_data.clear()
+            self.imu_target_data.clear()
+            if hasattr(self, 'imu_angle_data'):
+                self.imu_angle_data.clear()
+            
+            # 시간축을 누른 순간부터 0초가 되도록 리셋하고 플래그 ON
+            self.imu_start_time = time.time()
+            self.is_force_logging = True
+            
+        else: # 🌟 MODE_CALIB
+            self.current_pid_mode     = False
+            self.current_pwm          = 0
+            print("Applied: Calibration Mode. Systems halted for safety.")
 
         # 즉시 한 번 전송 (heartbeat 대기 안 함)
         self._send_current_command()
 
     def _send_current_command(self):
+        if not self.worker: return
         """현재 ctrl_mode + 입력값으로 CMD 0x01 1회 송신 (Phase 4 새 페이로드)."""
         if self.ctrl_mode == MODE_MANUAL:
             self.worker.send_control_message(
@@ -218,23 +332,45 @@ class MainWindow(QMainWindow):
                 manual_fan=False,
                 target=self.current_target,
                 display_ch=DISPLAY_CH)
-        else:  # MODE_FORCE
+        elif self.ctrl_mode == MODE_FORCE: 
             self.worker.send_control_message(
                 mode=CH_FORCE,
                 manual_pwm=0,
                 manual_fan=False,
                 target=self.current_force_target,
                 display_ch=DISPLAY_CH)
+        else: # 🌟 MODE_CALIB (안전을 위해 모터/팬 OFF 신호 전송)
+            self.worker.send_control_message(
+                mode=CH_OFF,
+                manual_pwm=0,
+                manual_fan=False,
+                target=0.0,
+                display_ch=DISPLAY_CH)
+            
+    def calibrate_imu(self):
+        if hasattr(self, 'imu_worker') and self.imu_worker.isRunning():
+            self.imu_worker.trigger_calibration()
+            print("\n[캘리브레이션] 버튼 입력: 차렷 자세 0점 재설정 완료! 🎯\n")
+            QMessageBox.information(self, "Calibration", "허리 각도 0점이 재설정되었습니다.")
+        else:
+            QMessageBox.warning(self, "Warning", "시스템(IMU)이 시작되지 않았습니다. START SYSTEM을 먼저 눌러주세요.")
 
     def send_heartbeat(self):
         """100ms 주기로 현재 명령 재송신 (모든 모드 동일 — Phase 4 통합)."""
         self._send_current_command()
 
     def stop_all(self):
-        self.worker.running = False
-        self.worker.wait()
+        if self.worker:   # 🌟 [추가]
+            self.worker.running = False
+            self.worker.wait()
+        
+        # 🌟 [추가] IMU 워커 종료
+        self.imu_worker.stop()
+        self.imu_worker.wait()
+        
         self.tx_timer.stop()
         self.plot_timer.stop()
+        
 
     def emergency_stop(self):
         print("!!! EMERGENCY STOP !!!")
@@ -242,25 +378,45 @@ class MainWindow(QMainWindow):
         self.current_fan      = False
         self.current_pid_mode = False
         self.current_target   = 0.0
+        self.is_force_logging = False
+        
+        
+        
+        # 1. IMU 워커 완전히 차단
+        if hasattr(self, 'imu_worker'):
+            try:
+                # IMU 데이터 수신 시그널을 강제로 끊어버림
+                self.imu_worker.angle_received.disconnect(self.handle_imu_angle)
+            except Exception:
+                pass # 이미 끊어져 있으면 무시
+            
+            # 스레드 정지 및 대기
+            self.imu_worker.stop()
+            self.imu_worker.wait()
+        
+        
+        
+        if self.worker:
 
-        # 모든 채널 OFF (Phase 4)
-        self.worker.send_control_message(
-            mode=CH_OFF,
-            manual_pwm=0,
-            manual_fan=False,
-            target=0.0,
-            display_ch=DISPLAY_CH)
+            # 모든 채널 OFF (Phase 4)
+            self.worker.send_control_message(
+                mode=CH_OFF,
+                manual_pwm=0,
+                manual_fan=False,
+                target=0.0,
+                display_ch=DISPLAY_CH)
+            
+            for sig, slot in [(self.worker.data_received,  self.handle_new_data),
+                (self.worker.force_received, self.handle_force_data)]:
+                try:
+                    sig.disconnect(slot)
+                except Exception:
+                    pass
+            
 
         self.tx_timer.stop()
         self.plot_timer.stop()
-
-        for sig, slot in [(self.worker.data_received,  self.handle_new_data),
-                          (self.worker.force_received, self.handle_force_data)]:
-            try:
-                sig.disconnect(slot)
-            except Exception:
-                pass
-
+               
         self.btn_stop.setText("STOPPED")
         self.btn_stop.setEnabled(False)
         self.btn_apply.setEnabled(False)
@@ -297,9 +453,15 @@ class MainWindow(QMainWindow):
         self.last_fan  = bool(fan)
 
     def handle_force_data(self, elapsed, force, displacement):
-        self.force_time_data.append(elapsed)
-        self.force_data.append(force)
-        self.disp_data.append(displacement)
+        # 🌟 [수정] 로깅 플래그가 켜져 있을 때만 데이터 추가
+        if self.is_force_logging:
+            self.force_time_data.append(elapsed)
+            self.force_data.append(force)
+            self.disp_data.append(displacement)
+            
+            self.angle_data.append(self.last_angle)
+            self.target_force_data.append(self.current_force_target)
+        
         self.last_force = force
         self.last_disp  = displacement
 
@@ -319,6 +481,8 @@ class MainWindow(QMainWindow):
         self.lbl_pwm.setText(f"PWM: {self.last_pwm}%")
         self.lbl_force.setText(f"Force: {self.last_force:.2f} g")
         self.lbl_disp.setText(f"Disp:  {self.last_disp:.2f} mm")
+        self.lbl_angle.setText(f"Torso Angle: {self.last_angle:.1f} °")
+        self.lbl_angle_velocity.setText(f"Angular velocity: {self.last_velocity:.1f} °/s")
 
         if self.last_temp > 70.0:
             self.lbl_temp.setStyleSheet(
@@ -342,21 +506,22 @@ class MainWindow(QMainWindow):
 
         # ── Force 그래프 ──
         if self.ctrl_mode == MODE_FORCE:
+                    
+            # 1. 실제 측정 힘 (모터 연결 시에만 그려짐)
             if self.force_time_data:
                 plot_ftime = self.force_time_data[-MAX_PLOT_POINTS:]
                 self.force_line.setData(plot_ftime, self.force_data[-MAX_PLOT_POINTS:])
                 
-                # 타겟 라인도 화면에 보이는 시간(t0 ~ t1)에 맞게 조정
-                t0, t1 = plot_ftime[0], plot_ftime[-1]
-                self.force_target_line.setData(
-                    [t0, t1],
-                    [self.current_force_target, self.current_force_target])
+            # 2. 🌟 [수정] 계산된 타겟 힘 (센서만 있어도 그려짐)
+            # 수평선을 그리던 기존 코드를 대체합니다.
+            if self.imu_time_data:
+                plot_itime = self.imu_time_data[-MAX_PLOT_POINTS:]
+                self.force_target_line.setData(plot_itime, self.imu_target_data[-MAX_PLOT_POINTS:])
                     
             if self.time_data:
                 plot_time = self.time_data[-MAX_PLOT_POINTS:]
                 self.fpwm_line.setData(plot_time, self.pwm_data[-MAX_PLOT_POINTS:])
                 self.ftemp_line.setData(plot_time, self.temp_data[-MAX_PLOT_POINTS:])
-
     # ──────────────────────────────────────────────────────────
     #  저장
     # ──────────────────────────────────────────────────────────
@@ -376,22 +541,45 @@ class MainWindow(QMainWindow):
                                      f"{self.temp_data[i]:.2f}",
                                      self.pwm_data[i]])
 
+            # ── Force 데이터 저장 (수정됨) ──
             with open(f"data_logs/{filename_base}_force.csv",
                       mode='w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(["Time(sec)", "Force(g)", "Displacement(mm)"])
-                for i in range(len(self.force_time_data)):
-                    writer.writerow([f"{self.force_time_data[i]:.3f}",
-                                     f"{self.force_data[i]:.3f}",
-                                     f"{self.disp_data[i]:.3f}"])
+                writer.writerow(["Time(sec)", "Force(g)", "Displacement(mm)", "Angle(deg)", "Target_Force(g)"])
+                
+                # 🌟 분기 처리: MCU 데이터가 수신된 적이 있는지 확인
+                if len(self.force_time_data) > 0:
+                    # [MCU + 센서 연결됨] -> 이전처럼 정확한 시간 동기화 모드로 저장
+                    length = len(self.force_time_data)
+                    for i in range(length):
+                        a_val = self.angle_data[i] if i < len(self.angle_data) else 0.0
+                        tf_val = self.target_force_data[i] if i < len(self.target_force_data) else 0.0
+                        writer.writerow([
+                            f"{self.force_time_data[i]:.3f}",
+                            f"{self.force_data[i]:.3f}",
+                            f"{self.disp_data[i]:.3f}",
+                            f"{a_val:.2f}",
+                            f"{tf_val:.2f}"
+                        ])
+                else:
+                    # [센서(IMU)만 단독 연결됨] -> IMU 타이머 기준으로 센서값만 저장
+                    length = len(self.imu_time_data)
+                    for i in range(length):
+                        a_val = self.imu_angle_data[i] if hasattr(self, 'imu_angle_data') and i < len(self.imu_angle_data) else 0.0
+                        tf_val = self.imu_target_data[i] if i < len(self.imu_target_data) else 0.0
+                        writer.writerow([
+                            f"{self.imu_time_data[i]:.3f}",
+                            "0.000",   # Force는 없으니 0 처리
+                            "0.000",   # Disp도 없으니 0 처리
+                            f"{a_val:.2f}",
+                            f"{tf_val:.2f}"
+                        ])
 
             self.grab().save(f"data_logs/{filename_base}.png", 'png')
-            QMessageBox.information(self, "Save Success",
-                f"Saved to data_logs/{filename_base}")
+            QMessageBox.information(self, "Save Success", f"Saved to data_logs/{filename_base}")
 
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
-
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
